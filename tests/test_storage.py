@@ -1,5 +1,3 @@
-import time
-
 from orderflow_ibkr.storage import SQLiteStore, open_readonly
 from orderflow_ibkr.writer import SQLiteEventWriter
 
@@ -34,12 +32,26 @@ def test_wal_writer_and_readonly_reader(tmp_path):
             "quality": "TBT_TRADES_MKTDATA_QUOTES",
         },
     )
+    writer.submit(
+        "latest",
+        {
+            "session_id": "s1",
+            "symbol": "TER",
+            "ts_ns": 124,
+            "mode": "focus",
+            "quality": "TBT_TRADES_MKTDATA_QUOTES",
+            "state_json": '{"delta":10,"bid_absorption":80}',
+        },
+    )
     writer.stop()
 
     ro = open_readonly(db)
     try:
         row = ro.execute("SELECT symbol,price,size,quality FROM raw_trades").fetchone()
         assert dict(row)["symbol"] == "TER"
+        latest = ro.execute("SELECT symbol,ts_ns,state_json FROM latest_state").fetchone()
+        assert dict(latest)["ts_ns"] == 124
+        assert "bid_absorption" in dict(latest)["state_json"]
         assert ro.execute("PRAGMA query_only").fetchone()[0] == 1
     finally:
         ro.close()
