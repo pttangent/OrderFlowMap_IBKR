@@ -9,16 +9,10 @@ from .storage import open_readonly
 
 QUERIES = {
     "latest": """
-        WITH ranked AS (
-          SELECT *, ROW_NUMBER() OVER(PARTITION BY symbol ORDER BY ts_ns DESC) AS rn
-          FROM orderflow_metrics
-          WHERE (? = '' OR instr(',' || ? || ',', ',' || symbol || ',') > 0)
-        )
-        SELECT symbol, ts_ns, last_price, delta, cvd, trades_per_sec, volume_per_sec,
-               quote_imbalance, bid_absorption, offer_absorption,
-               seller_exhaustion, buyer_exhaustion, activity_score, confidence, quality,
-               details_json
-        FROM ranked WHERE rn=1 ORDER BY activity_score DESC
+        SELECT symbol, session_id, ts_ns, mode, quality, state_json
+        FROM latest_state
+        WHERE (? = '' OR instr(',' || ? || ',', ',' || symbol || ',') > 0)
+        ORDER BY symbol
     """,
     "signals": """
         SELECT symbol, ts_ns, signal_type, direction, score, price, quality, explanation, evidence_json
@@ -66,6 +60,18 @@ def main() -> None:
         else:
             params = (args.limit,)
         rows = [dict(r) for r in conn.execute(QUERIES[args.query], params).fetchall()]
+        if args.query == "latest":
+            expanded = []
+            for row in rows:
+                state = json.loads(row.pop("state_json"))
+                # Keep storage metadata explicit even if state fields evolve.
+                state["symbol"] = row["symbol"]
+                state["session_id"] = row["session_id"]
+                state["ts_ns"] = row["ts_ns"]
+                state["mode"] = row["mode"]
+                state["quality"] = row["quality"]
+                expanded.append(state)
+            rows = expanded
         print(json.dumps(rows, ensure_ascii=False, indent=2))
     finally:
         conn.close()
