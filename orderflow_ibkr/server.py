@@ -11,6 +11,21 @@ from aiohttp import WSMsgType, web
 from .runtime import OrderFlowRuntime
 
 
+# Lightweight Charts requires strictly increasing/unique time values for a
+# LineSeries. FOCUS can produce many trades within one second, so the served UI
+# replaces the same-second point instead of appending duplicate timestamps.
+_SERIES_PATCH = """
+<script>
+pushSeries = function(map, sym, p, max=2400) {
+  const arr = (map[sym] ??= []);
+  if (arr.length && arr[arr.length - 1].time === p.time) arr[arr.length - 1] = p;
+  else arr.push(p);
+  if (arr.length > max) arr.splice(0, arr.length - max);
+};
+</script>
+"""
+
+
 class WorkstationServer:
     def __init__(self, runtime: OrderFlowRuntime, frontend: Path):
         self.runtime = runtime
@@ -18,8 +33,10 @@ class WorkstationServer:
         self.clients: set[web.WebSocketResponse] = set()
         self.broadcaster: asyncio.Task | None = None
 
-    async def index(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(self.frontend)
+    async def index(self, request: web.Request) -> web.Response:
+        html = self.frontend.read_text(encoding="utf-8")
+        html = html.replace("</body>", _SERIES_PATCH + "</body>")
+        return web.Response(text=html, content_type="text/html")
 
     async def status(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.status)
