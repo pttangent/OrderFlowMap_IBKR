@@ -11,7 +11,15 @@ from aiohttp import WSMsgType, web
 from .history import load_history
 from .runtime import OrderFlowRuntime
 
-ASSETS = {"flow.css", "flow-dom.js", "flow-state.js", "flow-chart.js", "flow-render.js", "flow-init.js"}
+ASSETS = {
+    "flow.css",
+    "flow-dom.js",
+    "flow-state.js",
+    "flow-chart.js",
+    "flow-render.js",
+    "flow-init.js",
+    "footprint-timeseries.js",
+}
 
 
 class WorkstationServer:
@@ -21,15 +29,23 @@ class WorkstationServer:
         self.clients: set[web.WebSocketResponse] = set()
         self.broadcaster: asyncio.Task | None = None
 
-    async def page(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(self.root / "flow_v2.html", headers={"Cache-Control": "no-store"})
+    async def page(self, request: web.Request) -> web.Response:
+        html = (self.root / "flow_v2.html").read_text(encoding="utf-8")
+        hook = '<script src="/static/footprint-timeseries.js"></script>'
+        if hook not in html:
+            html = html.replace("</body>", f"{hook}</body>")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def radar(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(self.root / "index.html", headers={"Cache-Control": "no-store"})
 
     async def learn(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(
-            self.root / "teaching" / "orderflow_multiview_tutorial.html",
+            self.root / "teaching" / "orderflow_timeseries_tutorial.html",
             headers={"Cache-Control": "no-store"},
         )
 
