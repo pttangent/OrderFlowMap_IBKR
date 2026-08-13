@@ -47,7 +47,6 @@ class OrderFlowRuntime:
         self._last_metric_ns: dict[str, int] = {}
         self._last_signal_ns: dict[tuple[str, str], int] = {}
         self._last_ranking_ns = 0
-        self._tasks: list[asyncio.Task] = []
 
         self.adapter = IBKRAdapter(
             symbols=self.symbols,
@@ -118,16 +117,42 @@ class OrderFlowRuntime:
         metric_row = {**m, "session_id": self.session_id, "symbol": symbol}
         metric_row["details_json"] = json.dumps(
             {
+                "score": m["score"],
                 "flow_score": m["flow_score"],
                 "absorption_score": m["absorption_score"],
                 "move_bps": m["move_bps"],
             },
             separators=(",", ":"),
         )
-        # score/flow_score/absorption_score/move_bps live in details/ranking,
-        # not the normalized metric table columns.
         self.writer.submit("metric", metric_row)
         self.latest_metrics[symbol] = m
+
+        # Compact O(1)-per-symbol current-state table for realtime read-only agents.
+        latest = {
+            **m,
+            "symbol": symbol,
+            "mode": self.adapter.plan.active_mode,
+            "quote": {
+                k: self.latest_quotes.get(symbol, {}).get(k)
+                for k in ("bid", "ask", "bid_size", "ask_size", "last", "last_size", "volume", "vwap", "trade_rate", "volume_rate")
+            },
+            "last_trade": {
+                k: self.latest_trades.get(symbol, {}).get(k)
+                for k in ("ts_ns", "price", "size", "exchange", "aggressor", "aggressor_confidence", "source")
+            },
+        }
+        self.writer.submit(
+            "latest",
+            {
+                "symbol": symbol,
+                "session_id": self.session_id,
+                "ts_ns": now_ns,
+                "mode": self.adapter.plan.active_mode,
+                "quality": quality,
+                "state_json": json.dumps(latest, separators=(",", ":"), default=str),
+            },
+        )
+
         footprint = self.engine.state(symbol).footprint(now_ns=now_ns, sec=300, tick_size=0.01)
         self._publish(
             {
