@@ -8,12 +8,9 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
+from .history import load_history
 from .runtime import OrderFlowRuntime
 
-
-# The radar dashboard uses Lightweight Charts line series and can receive many
-# updates in the same second. Inject a small coalescing patch only into that
-# legacy/dashboard page. The primary flow.html already handles this itself.
 _SERIES_PATCH = """
 <script>
 pushSeries = function(map, sym, p, max=2400) {
@@ -35,21 +32,43 @@ class WorkstationServer:
         self.broadcaster: asyncio.Task | None = None
 
     async def flow(self, request: web.Request) -> web.Response:
-        return web.Response(
-            text=self.flow_frontend.read_text(encoding="utf-8"),
-            content_type="text/html",
-        )
+        return web.Response(text=self.flow_frontend.read_text(encoding="utf-8"), content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def radar(self, request: web.Request) -> web.Response:
-        html = self.radar_frontend.read_text(encoding="utf-8")
-        html = html.replace("</body>", _SERIES_PATCH + "</body>")
-        return web.Response(text=html, content_type="text/html")
+        html = self.radar_frontend.read_text(encoding="utf-8").replace("</body>", _SERIES_PATCH + "</body>")
+        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def status(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.status)
 
     async def snapshot(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.snapshot())
+
+    @staticmethod
+    def _qint(request: web.Request, name: str, default: int) -> int:
+        try:
+            return int(request.query.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    async def history(self, request: web.Request) -> web.Response:
+        symbol = request.query.get("symbol", "").strip().upper()
+        if not symbol:
+            raise web.HTTPBadRequest(text="symbol is required")
+        if symbol not in self.runtime.symbols:
+            raise web.HTTPBadRequest(text=f"symbol {symbol} is not in the active universe")
+        payload = await asyncio.to_thread(
+            load_history,
+            self.runtime.db_path,
+            session_id=self.runtime.session_id,
+            symbol=symbol,
+            seconds=self._qint(request, "seconds", 900),
+            quote_limit=self._qint(request, "quotes", 5000),
+            trade_limit=self._qint(request, "trades", 5000),
+            metric_limit=self._qint(request, "metrics", 2000),
+            signal_limit=self._qint(request, "signals", 200),
+        )
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     async def ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2 * 1024 * 1024)
@@ -76,8 +95,8 @@ class WorkstationServer:
             payload = await self.runtime.event_queue.get()
             if not self.clients:
                 continue
-            dead = []
             text = json.dumps(payload, separators=(",", ":"), default=str)
+            dead = []
             for ws in tuple(self.clients):
                 try:
                     await ws.send_str(text)
@@ -88,24 +107,21 @@ class WorkstationServer:
 
     def app(self) -> web.Application:
         app = web.Application()
-        # Primary entry = visual order-flow workstation.
         app.router.add_get("/", self.flow)
         app.router.add_get("/flow", self.flow)
         app.router.add_get("/flow.html", self.flow)
-        # Multi-symbol scanner / Agent dashboard remains available separately.
         app.router.add_get("/radar", self.radar)
         app.router.add_get("/radar.html", self.radar)
         app.router.add_get("/index.html", self.flow)
         app.router.add_get("/api/status", self.status)
         app.router.add_get("/api/snapshot", self.snapshot)
+        app.router.add_get("/api/history", self.history)
         app.router.add_get("/ws", self.ws)
         return app
 
 
 async def _serve(args: argparse.Namespace) -> None:
     root = Path(__file__).resolve().parents[1]
-    flow_frontend = root / "flow.html"
-    radar_frontend = root / "index.html"
     runtime = OrderFlowRuntime(
         symbols=args.symbols,
         mode=args.mode,
@@ -116,16 +132,16 @@ async def _serve(args: argparse.Namespace) -> None:
         market_data_lines=args.market_data_lines,
     )
     await runtime.start()
-
-    server = WorkstationServer(runtime, flow_frontend, radar_frontend)
+    server = WorkstationServer(runtime, root / "flow.html", root / "index.html")
     runner = web.AppRunner(server.app(), access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, args.http_host, args.http_port)
     await site.start()
     server.broadcaster = asyncio.create_task(server.broadcast_loop())
 
-    print(f"OrderFlowMap IBKR Flow:  http://{args.http_host}:{args.http_port}/")
-    print(f"OrderFlowMap IBKR Radar: http://{args.http_host}:{args.http_port}/radar")
+    print(f"OrderFlowMap IBKR Flow:    http://{args.http_host}:{args.http_port}/")
+    print(f"OrderFlowMap IBKR Radar:   http://{args.http_host}:{args.http_port}/radar")
+    print(f"OrderFlowMap IBKR History: http://{args.http_host}:{args.http_port}/api/history?symbol={args.symbols[0]}")
     print(f"Mode={runtime.plan.active_mode} quality={runtime.plan.quality} symbols={','.join(args.symbols)}")
     print(f"SQLite={Path(args.db).resolve()} (WAL; safe for concurrent mode=ro readers)")
 
