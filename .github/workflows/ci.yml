@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: ["main", "agent/**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Compile
+        run: python -m compileall -q orderflow_ibkr
+      - name: Unit tests
+        run: pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Frontend JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path('index.html').read_text(encoding='utf-8')
+          blocks = re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, flags=re.S|re.I)
+          inline = [b for b in blocks if b.strip()]
+          Path('/tmp/orderflow-inline.js').write_text('\n'.join(inline), encoding='utf-8')
+          PY
+          node --check /tmp/orderflow-inline.js
