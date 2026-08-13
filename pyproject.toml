@@ -12,7 +12,7 @@ dependencies = [
 dev = ["pytest>=8,<9"]
 
 [project.scripts]
-orderflow-ibkr = "orderflow_ibkr.server:main"
+orderflow-ibkr = "orderflow_ibkr.workstation:main"
 
 [tool.setuptools.packages.find]
 include = ["orderflow_ibkr*"]
