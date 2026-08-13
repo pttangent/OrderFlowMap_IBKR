@@ -27,7 +27,7 @@ jobs:
           python - <<'PY'
           import re
           from pathlib import Path
-          for name in ('index.html', 'flow.html'):
+          for name in ('index.html', 'flow.html', 'flow_v2.html'):
               html = Path(name).read_text(encoding='utf-8')
               blocks = re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, flags=re.S|re.I)
               inline = [b for b in blocks if b.strip()]
@@ -36,3 +36,9 @@ jobs:
           PY
           node --check /tmp/index-inline.js
           node --check /tmp/flow-inline.js
+          node --check /tmp/flow_v2-inline.js
+          node --check static/flow-dom.js
+          node --check static/flow-state.js
+          node --check static/flow-chart.js
+          node --check static/flow-render.js
+          node --check static/flow-init.js
