@@ -27,9 +27,12 @@ jobs:
           python - <<'PY'
           import re
           from pathlib import Path
-          html = Path('index.html').read_text(encoding='utf-8')
-          blocks = re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, flags=re.S|re.I)
-          inline = [b for b in blocks if b.strip()]
-          Path('/tmp/orderflow-inline.js').write_text('\n'.join(inline), encoding='utf-8')
+          for name in ('index.html', 'flow.html'):
+              html = Path(name).read_text(encoding='utf-8')
+              blocks = re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, flags=re.S|re.I)
+              inline = [b for b in blocks if b.strip()]
+              out = Path('/tmp') / f'{Path(name).stem}-inline.js'
+              out.write_text('\n'.join(inline), encoding='utf-8')
           PY
-          node --check /tmp/orderflow-inline.js
+          node --check /tmp/index-inline.js
+          node --check /tmp/flow-inline.js
