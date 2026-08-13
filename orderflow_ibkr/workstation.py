@@ -11,7 +11,7 @@ from aiohttp import WSMsgType, web
 from .history import load_history
 from .runtime import OrderFlowRuntime
 
-ASSETS = {"flow.css", "flow-state.js", "flow-chart.js", "flow-render.js", "flow-init.js"}
+ASSETS = {"flow.css", "flow-dom.js", "flow-state.js", "flow-chart.js", "flow-render.js", "flow-init.js"}
 
 
 class WorkstationServer:
@@ -22,7 +22,7 @@ class WorkstationServer:
         self.broadcaster: asyncio.Task | None = None
 
     async def page(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(self.root / "flow.html", headers={"Cache-Control": "no-store"})
+        return web.FileResponse(self.root / "flow_v2.html", headers={"Cache-Control": "no-store"})
 
     async def radar(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(self.root / "index.html", headers={"Cache-Control": "no-store"})
@@ -133,7 +133,7 @@ async def serve(args: argparse.Namespace) -> None:
     await web.TCPSite(runner, args.http_host, args.http_port).start()
     server.broadcaster = asyncio.create_task(server.broadcast_loop())
 
-    print(f"OrderFlowMap Flow:    http://{args.http_host}:{args.http_port}/")
+    print(f"OrderFlowMap Flow V2: http://{args.http_host}:{args.http_port}/")
     print(f"OrderFlowMap Radar:   http://{args.http_host}:{args.http_port}/radar")
     print(f"History warm-start:   http://{args.http_host}:{args.http_port}/api/history?symbol={args.symbols[0]}")
     print(f"Mode={runtime.plan.active_mode} quality={runtime.plan.quality} symbols={','.join(args.symbols)}")
