@@ -1,436 +1,261 @@
-<p align="center">
-  <img src="screenshot.png" alt="OrderFlowMap Screenshot" width="900"/>
-</p>
+# OrderFlowMap // IBKR
 
-<h1 align="center">OrderFlowMap</h1>
+A local-first Interactive Brokers realtime radar and executed order-flow workstation.
 
-<p align="center">
-  <b>A Bookmap-style order flow visualization tool built entirely in the browser.</b><br>
-  Real-time heatmaps · Trade bubbles · DOM ladder · Volume profile · CVD · Liquidity wall detection
-</p>
+This fork replaces the original OpenAlgo/NSE live adapter with an **IBKR TWS / IB Gateway** backend while preserving the MIT-licensed OrderFlowMap visualization concept. The production design deliberately separates wide-universe scanning from scarce tick-by-tick capacity.
 
-<p align="center">
-  <a href="https://azhagesan-dev.github.io/OrderFlowMap/"><img src="https://img.shields.io/badge/🚀_Live_Demo-Try_It_Now-blue?style=for-the-badge" alt="Live Demo"/></a>
-  <a href="https://github.com/Azhagesan-dev/OrderFlowMap/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License"/></a>
-</p>
+## Two realtime modes
 
-<p align="center">
-  <a href="#features">Features</a> •
-  <a href="#live-demo">Live Demo</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#live-mode">Live Mode</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#keyboard-shortcuts">Shortcuts</a> •
-  <a href="#contributing">Contributing</a> •
-  <a href="#license">License</a>
-</p>
+| Mode | Intended universe | IBKR source | What is trustworthy |
+|---|---:|---|---|
+| **FOCUS** | up to 5 symbols with the default 100 market-data lines | `reqTickByTickData("AllLast")` + `reqMktData()` BBO context | True execution prints, executed footprint, Delta/CVD; BBO remains L1 market-data context |
+| **RADAR** | larger universe, typically 10–100 symbols | `reqMktData()` + generic ticks `233,293,294,295,375` | Price/BBO/activity/volume-rate scan; reconstructed trade flow is explicitly a proxy |
+| **AUTO** | automatic | <=5 → FOCUS, >5 → RADAR | Same quality rules as selected mode |
 
----
+The product intentionally caps FOCUS at five symbols even if an account has more capacity. With 100 market-data lines, IBKR's specialized tick-by-tick allocation is normally 5 simultaneous requests, so five `AllLast` subscriptions fit cleanly while quotes continue through `reqMktData()`.
 
-## What is OrderFlowMap?
+### Important quality boundary
 
-**OrderFlowMap** is a **zero-dependency, single-file** order flow visualization tool inspired by [Bookmap](https://bookmap.com/). It renders a real-time heatmap of the order book depth alongside trade executions, giving you an institutional-grade view of market microstructure — all inside a single HTML file.
+`RADAR` does **not** pretend that a 250 ms-ish L1 market-data stream is true Time & Sales. If cumulative volume rises between snapshots, the application can reconstruct a volume-delta trade proxy, but every such row and every derived metric is labeled:
 
-It works in two modes:
+`MKTDATA_SNAPSHOT_PROXY`
 
-| Mode | Description |
-|------|-------------|
-| **Simulate** | Generates synthetic NIFTY futures data with realistic market dynamics including sweeps, icebergs, and regime shifts. Perfect for learning and experimentation. |
-| **Live** | Connects to a self-hosted [OpenAlgo](https://github.com/marketcalls/openalgo) WebSocket server running on your machine to stream real market data from Indian exchanges (NSE, NFO, BSE, MCX, CDS). |
+FOCUS rows are labeled:
 
----
+`TBT_TRADES_MKTDATA_QUOTES`
 
-## Features
+The UI surfaces these labels continuously.
 
-### 🔥 Order Book Heatmap
-- Real-time L2 depth visualization with configurable intensity, gamma correction, and row height
-- Four color schemes: **Bookmap** (bi-color bid/ask), **Mono**, **Inferno**, **Viridis**
-- Per-tick bucketing ensures accurate price-level aggregation
-- Interactive colorbar legend with HIGH/LOW indicators
+## Current analytics
 
-### 🫧 Trade Bubbles
-- Every trade is plotted as a circle at its exact price and time
-- Bubble size scales with quantity (sqrt, log, or linear)
-- Large trades get a glowing halo effect for instant visibility
-- Small trades can be rendered as hollow circles to reduce visual noise
-- Configurable thresholds for minimum trade size and "large" trade classification
+- aggressive buy/sell classification using BBO, midpoint, then tick-rule fallback
+- 15-second executed/proxy Delta
+- session CVD
+- executed/proxy price-level footprint
+- trade/activity rate
+- volume rate
+- quote imbalance
+- bid absorption
+- offer absorption
+- seller exhaustion
+- buyer exhaustion
+- directional price impact
+- robust large-trade score
+- cross-symbol radar ranking
+- signal persistence/cooldown
 
-### 📊 Overlays & Analytics
-- **Best Bid/Ask lines** — real-time BBO tracking with color-coded series
-- **Session VWAP** — volume-weighted average price tracked across the session
-- **Volume Profile** — horizontal histogram anchored to the right edge with POC (Point of Control) highlighted
-- **CVD (Cumulative Volume Delta)** — separate pane with baseline coloring (green above zero, red below)
-- **Large-trade arrows** — marker arrows on the price chart for significant executions
-- **Liquidity wall detection** — algorithmic identification of persistent, abnormally large resting orders with dashed-line annotations and labeled tags
-- **Sweep flash alerts** — on-chart banner when aggressive sweeps are detected in simulation
+### Absorption interpretation
 
-### 📋 DOM Ladder
-- 5-level depth-of-market ladder with bid/ask quantities, order counts, and proportional bars
-- Spread row with real-time spread calculation
-- Crosshair-linked price highlighting
+The engine does not define support as "a large bid is visible". It looks for realized pressure plus muted price response. For example, heavy aggressive selling with little downside progress raises **Bid Absorption**. This is deliberately based on executed flow rather than claiming knowledge of deeper resting liquidity.
 
-### 🖨️ Time & Sales (Tape)
-- Scrollable trade tape showing the last 80 prints
-- Color-coded by side (buy/sell) with large-trade highlighting
-- Tabular-nums font for aligned, scannable data
+## No fake L2
 
-### 📈 Microstructure Stats
-- Trades per second, average trade size
-- Buy/Sell percentage split (60-second rolling window)
-- 1-minute delta display in the header
+This version does not yet call `reqMktDepth()`. Therefore it does **not** claim to observe:
 
-### ⌨️ Presets & Keyboard Shortcuts
-- One-click presets: **Scalper**, **Swing**, **HFT**, **Clean**
-- Full keyboard control (see [Keyboard Shortcuts](#keyboard-shortcuts))
+- deeper resting liquidity walls
+- queue position
+- multi-level order-book imbalance
+- cancellation dynamics
+- spoofing
+- true Bookmap-style historical L2 heatmap
 
----
+Those features belong to a later L2 module and require the corresponding IBKR market-depth entitlement.
 
-## Live Demo
+## SQLite is the fact layer
 
-### 👉 [**Try it live in your browser →**](https://azhagesan-dev.github.io/OrderFlowMap/)
+The browser UI is only one consumer. All raw and derived data is stored locally in SQLite using **WAL mode**, so another process or an AI agent can open the database concurrently in strict read-only mode while the market-data writer continues running.
 
-No installation required — the simulation mode works instantly. Just open and explore.
+Default path:
 
-Or run it locally:
+```text
+data/orderflow.sqlite
+```
+
+Stored tables:
+
+| Table | Purpose |
+|---|---|
+| `sessions` | run metadata and mode |
+| `subscriptions` | per-symbol source/quality contract |
+| `raw_quotes` | event-level reqMktData quote/generic-tick snapshots |
+| `raw_trades` | true TBT executions or explicitly marked RADAR proxies |
+| `orderflow_metrics` | 1 Hz derived microstructure state |
+| `signals` | scored absorption/exhaustion/activity events |
+| `radar_rankings` | cross-symbol ranking snapshots every ~2 s |
+| `latest_state` | reserved compact state cache |
+
+Raw events and derived metrics are deliberately separate so an agent can audit how a signal was produced instead of seeing only a final score.
+
+High-frequency inserts are written by a dedicated batching thread. SQLite runs with `journal_mode=WAL`, `synchronous=NORMAL`, and a busy timeout so read-only queries do not block the market-data callback path.
+
+## Read-only Agent access
+
+Use the included helper. It opens SQLite with URI `mode=ro` and `PRAGMA query_only=ON`.
 
 ```bash
-# Clone the repo
-git clone https://github.com/Azhagesan-dev/OrderFlowMap.git
-
-# Open in browser
-start OrderFlowMap/index.html        # Windows
-open OrderFlowMap/index.html          # macOS
-xdg-open OrderFlowMap/index.html      # Linux
+python -m orderflow_ibkr.agent_read --query latest
+python -m orderflow_ibkr.agent_read --query latest --symbols TER KLAC
+python -m orderflow_ibkr.agent_read --query signals --symbols TER --limit 50
+python -m orderflow_ibkr.agent_read --query trades --symbols TER --limit 200
+python -m orderflow_ibkr.agent_read --query quotes --symbols TER --limit 200
+python -m orderflow_ibkr.agent_read --query rankings --limit 30
 ```
 
-The app starts in **Simulate** mode with 3 minutes of pre-seeded NIFTY data streaming at 4× speed.
+An external agent can also connect directly:
 
----
+```python
+import sqlite3
 
-## Quick Start
-
-### Simulation Mode (Default)
-
-1. Open `index.html` in your browser
-2. The simulator auto-starts with synthetic NIFTY data at ~24,500
-3. Use the left panel to tweak heatmap intensity, bubble sizes, and toggle overlays
-4. Use the speed selector (top-right) to control simulation speed (1× to 20×)
-5. Press **Space** to pause/resume, **F** to fit the chart
-
-### Live Mode
-
-1. Click **Live** in the Data Source panel
-2. Enter your WebSocket URL (default: `ws://127.0.0.1:8765`)
-3. Enter your [OpenAlgo](https://github.com/marketcalls/openalgo) API key
-4. Set the symbol (e.g., `RELIANCE`, `NIFTY28APR26FUT`), exchange, and tick size
-5. Click **⚡ Connect**
-
-See [Live Mode Setup](#live-mode) for detailed instructions.
-
----
-
-## Live Mode
-
-### Prerequisites
-
-OrderFlowMap connects to live market data through a **self-hosted WebSocket server**. You must run [OpenAlgo](https://github.com/marketcalls/openalgo) on your own machine — OrderFlowMap connects to this local endpoint and renders the incoming data.
-
-> **Important:** OrderFlowMap is a pure front-end visualizer. It does **not** include a data server. You need to set up and run the OpenAlgo WebSocket server yourself.
-
-### Setting Up OpenAlgo (WebSocket Server)
-
-1. **Clone the OpenAlgo repository:**
-   ```bash
-   git clone https://github.com/marketcalls/openalgo.git
-   cd openalgo
-   ```
-
-2. **Follow the OpenAlgo setup instructions** in their [README](https://github.com/marketcalls/openalgo#readme) to:
-   - Install dependencies
-   - Configure your broker credentials
-   - Start the WebSocket server (default: `ws://127.0.0.1:8765`)
-
-3. **Verify the server is running** — the OpenAlgo WebSocket server should be listening on port `8765`
-
-4. **Open OrderFlowMap** → switch to **Live** mode → click **⚡ Connect**
-
-### Connection Flow
-
-```
-Browser (OrderFlowMap)                        Your Machine
-    │                                    ┌──────────────────────┐
-    │  WebSocket (ws://127.0.0.1:8765)   │                      │
-    └───────────────────────────────────► │  OpenAlgo Server     │
-                                         │  (self-hosted)       │
-                                         │       │              │
-                                         │       │ Broker API   │
-                                         │       ▼              │
-                                         │  Exchange Data Feed  │
-                                         │  (NSE/NFO/BSE/MCX)   │
-                                         └──────────────────────┘
+conn = sqlite3.connect(
+    "file:data/orderflow.sqlite?mode=ro",
+    uri=True,
+)
+conn.row_factory = sqlite3.Row
+conn.execute("PRAGMA query_only=ON")
 ```
 
-### WebSocket Protocol
+Example question the SQL layer can answer during the session:
 
-**1. Authentication**
-```json
-{ "action": "authenticate", "api_key": "YOUR_API_KEY" }
-```
-Response:
-```json
-{ "message": "Authentication successful" }
-```
-
-**2. Subscribe**
-```json
-{
-  "action": "subscribe",
-  "symbol": "RELIANCE",
-  "exchange": "NSE",
-  "mode": 3,
-  "depth": 5
-}
+```sql
+WITH x AS (
+  SELECT *, ROW_NUMBER() OVER(PARTITION BY symbol ORDER BY ts_ns DESC) rn
+  FROM orderflow_metrics
+)
+SELECT symbol, last_price, delta, cvd,
+       bid_absorption, offer_absorption,
+       seller_exhaustion, buyer_exhaustion,
+       activity_score, confidence, quality
+FROM x
+WHERE rn=1
+ORDER BY activity_score DESC;
 ```
 
-**3. Market Data (incoming)**
-```json
-{
-  "type": "market_data",
-  "data": {
-    "ltp": 2450.50,
-    "volume": 1234567,
-    "ltt": 1713345678000,
-    "depth": {
-      "buy": [
-        { "price": 2450.45, "quantity": 500, "orders": 12 },
-        ...
-      ],
-      "sell": [
-        { "price": 2450.55, "quantity": 300, "orders": 8 },
-        ...
-      ]
-    }
-  }
-}
+## Install
+
+Python 3.11+ is recommended.
+
+```bash
+git clone https://github.com/pttangent/OrderFlowMap_IBKR.git
+cd OrderFlowMap_IBKR
+git checkout agent/ibkr-dual-mode-adapter
+pip install -e .
 ```
 
-### Trade Detection
+Enable API connections in TWS or IB Gateway and make sure your market-data subscriptions are available to the API session.
 
-Since the WebSocket feed provides snapshots (not individual trade prints), OrderFlowMap reconstructs trades using **volume delta analysis**:
+Paper TWS commonly uses port `7497`; live TWS commonly uses `7496`. Verify your own TWS/Gateway settings rather than assuming the defaults.
 
-1. Compare `volume` between consecutive ticks
-2. If `volume` increased → a trade occurred with `qty = volumeDelta`
-3. Side is inferred by comparing current `ltp` with previous `ltp`:
-   - LTP went **up** → classified as a **buy** (aggressive buyer lifted the ask)
-   - LTP went **down** → classified as a **sell** (aggressive seller hit the bid)
-   - LTP **unchanged** → side carries forward from the previous trade
+The backend connects with `readonly=True` and uses a separate default client ID (`4712`).
 
-### Supported Exchanges
+## Run
 
-| Exchange | Code | Description |
-|----------|------|-------------|
-| NSE | `NSE` | National Stock Exchange (Equity) |
-| NFO | `NFO` | NSE Futures & Options |
-| BSE | `BSE` | Bombay Stock Exchange |
-| BFO | `BFO` | BSE Futures & Options |
-| MCX | `MCX` | Multi Commodity Exchange |
-| CDS | `CDS` | Currency Derivatives |
+### Five-symbol FOCUS
 
-### Tick Size Configuration
+```bash
+orderflow-ibkr \
+  --symbols TER KLAC AEHR COHU FORM \
+  --mode focus
+```
 
-Set the correct tick size for your instrument:
+or:
 
-| Instrument | Tick Size |
-|------------|-----------|
-| NIFTY / BANKNIFTY Futures | `0.05` |
-| Equity (NSE) | `0.05` |
-| NIFTY / BANKNIFTY Options | `0.05` |
-| MCX Gold | `1.00` |
-| MCX Crude Oil | `1.00` |
+```bash
+python -m orderflow_ibkr.server \
+  --symbols TER KLAC AEHR COHU FORM \
+  --mode auto
+```
 
----
+AUTO selects FOCUS for five or fewer symbols.
+
+### Wider reqMktData RADAR
+
+```bash
+python -m orderflow_ibkr.server \
+  --symbols AAPL MSFT NVDA AMD AVGO MU TER KLAC LRCX AMAT ONTO COHU FORM AEHR PDFS \
+  --mode radar
+```
+
+AUTO selects RADAR when the symbol count exceeds five.
+
+### Explicit connection/settings
+
+```bash
+python -m orderflow_ibkr.server \
+  --symbols TER KLAC \
+  --mode focus \
+  --ib-host 127.0.0.1 \
+  --ib-port 7497 \
+  --client-id 4712 \
+  --market-data-lines 100 \
+  --db data/orderflow.sqlite \
+  --http-port 8765
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The frontend connects to the local backend at `/ws`; no broker credential or API key is exposed to browser JavaScript.
 
 ## Architecture
 
-OrderFlowMap is a **single HTML file** (~1,700 lines) with no build tooling, no framework, and a single external dependency:
-
-### Dependency
-
-| Library | Version | Purpose |
-|---------|---------|---------|
-| [Lightweight Charts™](https://tradingview.github.io/lightweight-charts/) | v5.0.9 | High-performance financial charting (via CDN) |
-
-### Internal Structure
-
-```
-index.html
-├── <style>          — Complete CSS design system (~210 lines)
-├── <body>           — HTML layout with header, 3-column grid, footer
-└── <script>         — Application logic (~1,250 lines)
-    ├── Config & State
-    ├── Utilities (clamp, mix, rgba, roundTick, gauss)
-    ├── Color Maps (bookmap, mono, inferno, viridis)
-    ├── Chart Setup (Lightweight Charts v5 initialization)
-    ├── Custom Primitives
-    │   ├── HeatmapPrimitive — L2 depth rendering + volume profile
-    │   ├── WallsPrimitive   — Liquidity wall detection & annotation
-    │   └── BubblesPrimitive — Trade bubble rendering with halo effects
-    ├── Simulator Engine
-    │   ├── Regime model (drift, volatility, sweeps, icebergs)
-    │   └── Synthetic order book & trade generation
-    ├── Live WebSocket Client
-    │   ├── OpenAlgo auth/subscribe protocol
-    │   ├── Trade detection via volume delta
-    │   └── Real-time VWAP computation
-    ├── Renderers (DOM ladder, tape, colorbar, alerts)
-    ├── UI Controls (range sliders, checkboxes, presets)
-    └── Boot sequence (seed history → start loop)
+```text
+                   IBKR TWS / IB Gateway
+                           |
+              +------------+------------+
+              |                         |
+         FOCUS <= 5                   RADAR > 5
+       AllLast true TBT              reqMktData
+       + L1 BBO context        + RTVolume/rate ticks
+              |                         |
+              +------------+------------+
+                           |
+                    Common event model
+                 QuoteEvent / TradeEvent
+                           |
+                    OrderFlow Engine
+            Delta / CVD / absorption / etc.
+                           |
+             +-------------+-------------+
+             |                           |
+        SQLite WAL                    WebSocket
+    raw + metrics + signals              |
+             |                           |
+      read-only Agent                   UI
 ```
 
-### Custom Primitives (Lightweight Charts v5 API)
+## Storage cadence
 
-OrderFlowMap uses the [Custom Series Primitives API](https://tradingview.github.io/lightweight-charts/docs/plugins/custom_primitives) to render the heatmap, bubbles, and walls directly on the chart canvas:
+- raw quotes: event-level packets carrying reqMktData changes
+- raw TBT trades: every received AllLast execution in FOCUS
+- RADAR proxy trades: only when cumulative volume increases between market-data snapshots
+- derived metrics: throttled to ~1 Hz per symbol
+- cross-symbol rankings: ~2-second cadence
+- duplicate persistent signals: 15-second cooldown
 
-| Primitive | Render Layer | Description |
-|-----------|-------------|-------------|
-| `HeatmapPrimitive` | `bottom` | Renders L2 depth as colored rectangles + volume profile bars |
-| `WallsPrimitive` | `top` | Detects and draws liquidity walls with labels |
-| `BubblesPrimitive` | `top` | Draws trade circles with size ∝ quantity |
+The SQLite writer batches inserts off the market-data callback path.
 
-### Data Model
+## Development
 
-| Array | Per-second | Fields |
-|-------|-----------|--------|
-| `bars[]` | ✅ | `time`, `mid`, `bbid`, `bask`, `vwap`, `_vN`, `_vD` |
-| `depth[]` | ✅ | `time`, `bids[{p, q, o}]`, `asks[{p, q, o}]` |
-| `cvdBars[]` | ✅ | `time`, `value` (running cumulative delta) |
-| `trades[]` | Per-tick | `time`, `price`, `qty`, `side` |
-| `tradeVolByPrice` | Map | `price → cumulative volume` (for volume profile) |
+```bash
+pip install -e ".[dev]"
+pytest -q
+python -m compileall -q orderflow_ibkr
+```
 
-### Simulator
-
-The built-in simulator generates realistic market dynamics:
-
-- **Regime model**: drift, volatility, sweep events, and iceberg orders evolve over time
-- **Order book**: 5 levels per side with Poisson-like quantity distributions
-- **Trade generation**: side probability is influenced by imbalance, drift, and sweep direction
-- **Fat-tail trade sizes**: log-normal distribution with occasional 3–8× multiplier spikes
-- **Sweep events**: ~1.2% chance per tick, creating aggressive directional pressure for 8–30 ticks
-- **Iceberg orders**: ~0.8% chance per tick, adding hidden refill liquidity at a specific level
-
----
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Space` | Play / Pause simulation |
-| `F` | Fit chart to content |
-| `H` | Toggle heatmap |
-| `B` | Toggle trade bubbles |
-| `V` | Toggle VWAP |
-| `C` | Toggle CVD pane |
-
----
-
-## Configuration Reference
-
-### Heatmap Settings
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| Intensity | 0.1 – 3.0 | 1.2 | Overall brightness multiplier for depth colors |
-| Gamma | 0.3 – 2.5 | 0.65 | Non-linear contrast curve (lower = more contrast) |
-| Row px | 2 – 14 | 5 | Pixel height of each price level row |
-| Min qty | 0+ | 0 | Minimum quantity to render (noise filter) |
-| Color | — | Bookmap | Color scheme selection |
-
-### Bubble Settings
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| Min px | 1 – 10 | 2 | Minimum bubble radius in pixels |
-| Max px | 6 – 60 | 26 | Maximum bubble radius in pixels |
-| Scale | — | Sqrt | Size scaling function (sqrt / log / linear) |
-| Large ≥ | 1+ | 500 | Quantity threshold for "large trade" treatment |
-| Min trade | 0+ | 0 | Minimum quantity to show any bubble |
-| Hollow small | — | On | Render small trades as hollow circles |
-
-### Presets
-
-| Preset | Use Case | Key Settings |
-|--------|----------|-------------|
-| **Scalper** | Short-term intraday | High intensity, smaller large threshold (300) |
-| **Swing** | Multi-hour holds | Lower intensity, bubbles off, high large threshold (1000) |
-| **HFT** | Ultra-short frequency | Maximum intensity, big rows, walls/VP off |
-| **Clean** | Minimal view | Heatmap/bubbles off, VP and CVD only |
-
----
-
-## Browser Compatibility
-
-OrderFlowMap requires a modern browser with ES2020+ support:
-
-| Browser | Minimum Version |
-|---------|----------------|
-| Chrome / Edge | 88+ |
-| Firefox | 85+ |
-| Safari | 14+ |
-
-> **Note**: The app uses Canvas 2D rendering via Lightweight Charts. WebGL is not required.
-
----
-
-## Performance Notes
-
-- **History window** is configurable (60s – 7200s, default 600s). Longer windows increase memory and CPU usage.
-- **Heatmap rendering** iterates over all visible depth snapshots per frame. At 4× speed with 600s history, this is ~2,400 snapshots per frame.
-- **Trade bubbles** cap iteration at the most recent 3,000 trades for performance.
-- **DOM/Tape rendering** uses `innerHTML` batch updates for efficiency.
-- **Auto-trimming** keeps all arrays bounded to the history window.
-
-For best performance with large history windows (>1800s), use Chrome/Edge and a dedicated GPU.
-
----
+CI also extracts the inline frontend JavaScript and runs `node --check`.
 
 ## Roadmap
 
-- [ ] Multi-symbol support with tabbed charts
-- [ ] Recorded session playback (import/export JSON)
-- [ ] Configurable depth levels (currently fixed at 5)
-- [ ] WebSocket reconnection with backoff
-- [ ] Additional data source adapters (Binance, Zerodha Kite)
-- [ ] Dark/light theme toggle
-- [ ] Snapshot export (PNG / SVG)
+1. dynamic TBT allocator: wide RADAR automatically promotes the most abnormal symbols into scarce TBT slots
+2. optional `BidAsk` tick-by-tick mode for 2-symbol deep focus
+3. `reqMktDepth()` L2 adapter and real historical liquidity heatmap
+4. replay from SQLite without reconnecting to IBKR
+5. configurable session/price-level baselines and time-of-day normalization
+6. optional desktop packaging with Tauri
 
----
+## License and attribution
 
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## License
-
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
----
-
-## Acknowledgments
-
-- [TradingView Lightweight Charts](https://tradingview.github.io/lightweight-charts/) — the high-performance charting library powering the visualization
-- [Bookmap](https://bookmap.com/) — inspiration for the heatmap visualization concept
-- [OpenAlgo](https://github.com/marketcalls/openalgo) by [@marketcalls](https://github.com/marketcalls) — self-hosted WebSocket server for Indian market data feeds
-
----
-
-<p align="center">
-  <sub>Built with ❤️ for the Indian trading community</sub>
-</p>
+MIT License. This fork derives its visualization concept from `Azhagesan-dev/OrderFlowMap` and retains the original MIT license terms.
