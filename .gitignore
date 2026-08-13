@@ -18,14 +18,28 @@ Desktop.ini
 # Environment
 .env
 .env.local
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
 
-# Node (shouldn't exist, but just in case)
+# Node
 node_modules/
 package-lock.json
 
 # Build artifacts
 dist/
 build/
+*.egg-info/
+
+# Realtime local data (never commit market-data databases)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 
 # Reference / internal files
 reference/
