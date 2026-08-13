@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import queue
 import sqlite3
 import threading
@@ -69,6 +68,31 @@ class SQLiteEventWriter:
             grouped.setdefault(kind, []).append(row)
         with conn:
             for kind, rows in grouped.items():
+                if kind == "latest":
+                    conn.executemany(
+                        """
+                        INSERT INTO latest_state(symbol,session_id,ts_ns,mode,quality,state_json)
+                        VALUES(?,?,?,?,?,?)
+                        ON CONFLICT(symbol) DO UPDATE SET
+                          session_id=excluded.session_id,
+                          ts_ns=excluded.ts_ns,
+                          mode=excluded.mode,
+                          quality=excluded.quality,
+                          state_json=excluded.state_json
+                        """,
+                        [
+                            [
+                                r.get("symbol"),
+                                r.get("session_id"),
+                                r.get("ts_ns"),
+                                r.get("mode"),
+                                r.get("quality"),
+                                r.get("state_json"),
+                            ]
+                            for r in rows
+                        ],
+                    )
+                    continue
                 sql, cols = self._sql(kind)
                 conn.executemany(sql, [[r.get(c) for c in cols] for r in rows])
         self.written += len(batch)
