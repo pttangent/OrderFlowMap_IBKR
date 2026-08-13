@@ -27,6 +27,12 @@ class WorkstationServer:
     async def radar(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(self.root / "index.html", headers={"Cache-Control": "no-store"})
 
+    async def learn(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(
+            self.root / "teaching" / "orderflow_multiview_tutorial.html",
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def asset(self, request: web.Request) -> web.FileResponse:
         name = request.match_info["name"]
         if name not in ASSETS:
@@ -107,6 +113,8 @@ class WorkstationServer:
         app.router.add_get("/flow.html", self.page)
         app.router.add_get("/radar", self.radar)
         app.router.add_get("/radar.html", self.radar)
+        app.router.add_get("/learn", self.learn)
+        app.router.add_get("/teaching", self.learn)
         app.router.add_get("/static/{name}", self.asset)
         app.router.add_get("/api/status", self.status)
         app.router.add_get("/api/snapshot", self.snapshot)
@@ -135,6 +143,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     print(f"OrderFlowMap Flow V2: http://{args.http_host}:{args.http_port}/")
     print(f"OrderFlowMap Radar:   http://{args.http_host}:{args.http_port}/radar")
+    print(f"OrderFlowMap Learn:   http://{args.http_host}:{args.http_port}/learn")
     print(f"History warm-start:   http://{args.http_host}:{args.http_port}/api/history?symbol={args.symbols[0]}")
     print(f"Mode={runtime.plan.active_mode} quality={runtime.plan.quality} symbols={','.join(args.symbols)}")
     print(f"SQLite={Path(args.db).resolve()}")
