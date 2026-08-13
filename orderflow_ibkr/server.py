@@ -11,9 +11,9 @@ from aiohttp import WSMsgType, web
 from .runtime import OrderFlowRuntime
 
 
-# Lightweight Charts requires strictly increasing/unique time values for a
-# LineSeries. FOCUS can produce many trades within one second, so the served UI
-# replaces the same-second point instead of appending duplicate timestamps.
+# The radar dashboard uses Lightweight Charts line series and can receive many
+# updates in the same second. Inject a small coalescing patch only into that
+# legacy/dashboard page. The primary flow.html already handles this itself.
 _SERIES_PATCH = """
 <script>
 pushSeries = function(map, sym, p, max=2400) {
@@ -27,14 +27,21 @@ pushSeries = function(map, sym, p, max=2400) {
 
 
 class WorkstationServer:
-    def __init__(self, runtime: OrderFlowRuntime, frontend: Path):
+    def __init__(self, runtime: OrderFlowRuntime, flow_frontend: Path, radar_frontend: Path):
         self.runtime = runtime
-        self.frontend = frontend
+        self.flow_frontend = flow_frontend
+        self.radar_frontend = radar_frontend
         self.clients: set[web.WebSocketResponse] = set()
         self.broadcaster: asyncio.Task | None = None
 
-    async def index(self, request: web.Request) -> web.Response:
-        html = self.frontend.read_text(encoding="utf-8")
+    async def flow(self, request: web.Request) -> web.Response:
+        return web.Response(
+            text=self.flow_frontend.read_text(encoding="utf-8"),
+            content_type="text/html",
+        )
+
+    async def radar(self, request: web.Request) -> web.Response:
+        html = self.radar_frontend.read_text(encoding="utf-8")
         html = html.replace("</body>", _SERIES_PATCH + "</body>")
         return web.Response(text=html, content_type="text/html")
 
@@ -81,8 +88,14 @@ class WorkstationServer:
 
     def app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/", self.index)
-        app.router.add_get("/index.html", self.index)
+        # Primary entry = visual order-flow workstation.
+        app.router.add_get("/", self.flow)
+        app.router.add_get("/flow", self.flow)
+        app.router.add_get("/flow.html", self.flow)
+        # Multi-symbol scanner / Agent dashboard remains available separately.
+        app.router.add_get("/radar", self.radar)
+        app.router.add_get("/radar.html", self.radar)
+        app.router.add_get("/index.html", self.flow)
         app.router.add_get("/api/status", self.status)
         app.router.add_get("/api/snapshot", self.snapshot)
         app.router.add_get("/ws", self.ws)
@@ -91,7 +104,8 @@ class WorkstationServer:
 
 async def _serve(args: argparse.Namespace) -> None:
     root = Path(__file__).resolve().parents[1]
-    frontend = root / "index.html"
+    flow_frontend = root / "flow.html"
+    radar_frontend = root / "index.html"
     runtime = OrderFlowRuntime(
         symbols=args.symbols,
         mode=args.mode,
@@ -103,14 +117,15 @@ async def _serve(args: argparse.Namespace) -> None:
     )
     await runtime.start()
 
-    server = WorkstationServer(runtime, frontend)
+    server = WorkstationServer(runtime, flow_frontend, radar_frontend)
     runner = web.AppRunner(server.app(), access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, args.http_host, args.http_port)
     await site.start()
     server.broadcaster = asyncio.create_task(server.broadcast_loop())
 
-    print(f"OrderFlowMap IBKR: http://{args.http_host}:{args.http_port}")
+    print(f"OrderFlowMap IBKR Flow:  http://{args.http_host}:{args.http_port}/")
+    print(f"OrderFlowMap IBKR Radar: http://{args.http_host}:{args.http_port}/radar")
     print(f"Mode={runtime.plan.active_mode} quality={runtime.plan.quality} symbols={','.join(args.symbols)}")
     print(f"SQLite={Path(args.db).resolve()} (WAL; safe for concurrent mode=ro readers)")
 
