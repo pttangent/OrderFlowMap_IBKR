@@ -6,10 +6,12 @@ import json
 import os
 import re
 import signal
-from datetime import date
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+import aiohttp
 from aiohttp import WSMsgType, web
 
 from .alpaca_replay import (
@@ -46,6 +48,7 @@ class WorkstationServer:
         self.broadcaster: asyncio.Task | None = None
         self.replay_prepare_task: asyncio.Task | None = None
         self.replay_speed = 1.0
+        self.market_reference_cache: dict[tuple[str, date], dict[str, Any]] = {}
         self.replay_prepare_state: dict[str, Any] = {
             "state": "idle",
             "symbol_cap": REPLAY_SYMBOL_CAP,
@@ -94,6 +97,72 @@ class WorkstationServer:
         if isinstance(self.runtime, ReplayRuntime):
             return web.json_response(self.runtime.snapshot(include_history=include_history))
         return web.json_response(self.runtime.snapshot())
+
+    def _reference_day(self) -> date:
+        eastern = ZoneInfo("America/New_York")
+        if isinstance(self.runtime, ReplayRuntime):
+            return datetime.fromtimestamp(self.runtime.start_ns / 1_000_000_000, tz=eastern).date()
+        return datetime.now(eastern).date()
+
+    async def market_reference(self, request: web.Request) -> web.Response:
+        symbol = request.query.get("symbol", "").strip().upper()
+        if symbol not in self.runtime.symbols:
+            raise web.HTTPBadRequest(text="symbol is not in the active universe")
+        target = self._reference_day()
+        cached = self.market_reference_cache.get((symbol, target))
+        if cached is not None:
+            return web.json_response(cached, headers={"Cache-Control": "no-store"})
+        key = self.args.alpaca_key or os.getenv("APCA_API_KEY_ID")
+        secret = self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY")
+        if not key or not secret:
+            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+        eastern = ZoneInfo("America/New_York")
+        start = datetime.combine(target - timedelta(days=10), dtime.min, tzinfo=eastern).astimezone(timezone.utc)
+        end = datetime.combine(target + timedelta(days=1), dtime.min, tzinfo=eastern).astimezone(timezone.utc)
+        params = {
+            "timeframe": "1Day",
+            "start": start.isoformat().replace("+00:00", "Z"),
+            "end": end.isoformat().replace("+00:00", "Z"),
+            "adjustment": "raw",
+            "feed": "sip",
+            "limit": "20",
+        }
+        headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as client:
+                async with client.get(
+                    f"https://data.alpaca.markets/v2/stocks/{symbol}/bars",
+                    params=params,
+                    headers=headers,
+                ) as response:
+                    if response.status != 200:
+                        return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+                    rows = (await response.json()).get("bars", [])
+        except Exception:
+            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+        parsed: list[tuple[date, dict[str, Any]]] = []
+        for row in rows:
+            try:
+                stamp = str(row["t"]).replace("Z", "+00:00")
+                day = datetime.fromisoformat(stamp).astimezone(eastern).date()
+                parsed.append((day, row))
+            except (KeyError, TypeError, ValueError):
+                continue
+        current = next((row for day, row in reversed(parsed) if day == target), None)
+        previous = next((row for day, row in reversed(parsed) if day < target), None)
+        if current is None or previous is None:
+            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+        payload = {
+            "available": True,
+            "symbol": symbol,
+            "trading_day": target.isoformat(),
+            "session_open": float(current["o"]),
+            "previous_close": float(previous["c"]),
+            "source": "alpaca_sip_daily",
+        }
+        self.market_reference_cache[(symbol, target)] = payload
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     @staticmethod
     def qint(request: web.Request, name: str, default: int) -> int:
@@ -501,6 +570,7 @@ class WorkstationServer:
         app.router.add_get("/static/{name}", self.asset)
         app.router.add_get("/api/status", self.status)
         app.router.add_get("/api/snapshot", self.snapshot)
+        app.router.add_get("/api/market-reference", self.market_reference)
         app.router.add_get("/api/history", self.history)
         app.router.add_get("/api/replay", self.replay_state)
         app.router.add_post("/api/replay/control", self.replay_control)
