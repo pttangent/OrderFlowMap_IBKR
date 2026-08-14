@@ -20,7 +20,7 @@
 /* Pressure is a compact dashboard: keep the whole middle view inside the viewport. */
 .center:has(#view-pressure.on){overflow:hidden!important;min-height:0}
 #view-pressure.on{min-height:0!important;overflow:hidden!important;grid-template-rows:46px minmax(0,1fr)!important}
-#view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,1fr) minmax(0,2fr)!important}
+#view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,1fr) minmax(0,1fr)!important}
 #view-pressure.on #pressureBars,
 #view-pressure.on #pressureEvidence{min-height:0!important;overflow:auto!important}
 #view-pressure.on #pressureHistogram{display:flex!important;flex-direction:column!important;min-height:0!important;height:auto!important;overflow:hidden!important;margin:0!important}
@@ -28,3 +28,8 @@
 #view-pressure.on #pressureHistogram .pressureHistogramScroll{flex:1 1 auto!important;min-height:0!important;height:auto!important;overflow:hidden!important;padding-bottom:0!important}
 #view-pressure.on #pressureHistogram #pressureHistogramCanvas{display:block;width:100%!important;height:100%!important;max-width:none!important}
 #view-pressure.on #pressureHistogram .pressureSignalControls{flex:0 0 34px;height:34px!important;min-height:34px!important;margin-top:0!important;padding:5px 0 0!important}
+#pressureMetricsOnlyCanvas{display:none}
+.pressure-metrics-only #view-pressure.on #pressureHistogramCanvas{display:none!important}
+.pressure-metrics-only #view-pressure.on #pressureMetricsOnlyCanvas{display:block!important;width:100%!important;height:100%!important}
+.pressureViewToggle{margin-left:auto;border:1px solid #343434;background:#111;color:#aaa;padding:3px 7px;font:8px ui-monospace;cursor:pointer}
+.pressureViewToggle:hover{color:#fff;border-color:#5c7f8a;background:#142027}

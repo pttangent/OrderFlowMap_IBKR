@@ -23,6 +23,65 @@ function mountReplayBar(){ensureFormationTitle();const head=document.querySelect
 mountReplayBar();
 document.addEventListener('click',event=>{if(!event.target.closest('.viewBtn'))return;requestAnimationFrame(()=>{if(isReplayMode())mountReplayBar()})});
 
+let pressureMetricsOnly=false;
+let pressureMetricsCanvas=null;
+
+function pressureBarsForMetrics(){
+ const sym=window.OF?.S?.selected;if(!sym)return[];
+ const interval=Number(window.OF?.footprintInterval?.())||30;
+ const buckets=new Map(),bucket=ns=>Math.floor(Number(ns)/1e9/interval)*interval;
+ const get=time=>buckets.get(time)||{time,volume:0,hits:[0,0,0,0,0]};
+ for(const trade of (window.OF?.S?.trades?.[sym]||[]).slice(-7000)){
+   const bar=get(bucket(trade.ts_ns));bar.volume+=Number(trade.size)||0;buckets.set(bar.time,bar);
+ }
+ for(const metric of (window.OF?.S?.metrics?.[sym]||[])){
+   const bar=get(bucket(metric.ts_ns));
+   [metric.bid_absorption,metric.offer_absorption,metric.seller_exhaustion,metric.buyer_exhaustion,metric.activity_score]
+     .forEach((value,index)=>{if(Number(value)>=70)bar.hits[index]++});
+   buckets.set(bar.time,bar);
+ }
+ return [...buckets.values()].sort((a,b)=>a.time-b.time).slice(-36);
+}
+
+function drawPressureMetricsOnly(){
+ const scroll=document.querySelector('#view-pressure.on #pressureHistogram .pressureHistogramScroll');
+ if(!scroll)return;
+ if(!pressureMetricsCanvas){
+   pressureMetricsCanvas=document.createElement('canvas');
+   pressureMetricsCanvas.id='pressureMetricsOnlyCanvas';
+   scroll.appendChild(pressureMetricsCanvas);
+ }
+ const width=Math.max(240,scroll.clientWidth),height=Math.max(110,scroll.clientHeight),ratio=window.devicePixelRatio||1;
+ pressureMetricsCanvas.width=width*ratio;pressureMetricsCanvas.height=height*ratio;
+ pressureMetricsCanvas.style.width=`${width}px`;pressureMetricsCanvas.style.height=`${height}px`;
+ const g=pressureMetricsCanvas.getContext('2d');g.setTransform(ratio,0,0,ratio,0,0);g.clearRect(0,0,width,height);
+ const bars=pressureBarsForMetrics();if(!bars.length)return;
+ const maxHits=Math.max(1,...bars.flatMap(bar=>bar.hits)),maxVolume=Math.max(1,...bars.map(bar=>bar.volume));
+ const colors=['#4bd39b','#ff7474','#9be6c9','#ffaaaa','#66c7e8','#e6bd61'],slot=width/bars.length,top=12,bottom=height-20;
+ bars.forEach((bar,index)=>{
+   const values=[...bar.hits,bar.volume/maxVolume*maxHits],gap=Math.max(1,slot*.025),barWidth=Math.max(1,(slot*.82-gap*5)/6);
+   values.forEach((value,column)=>{const barHeight=(bottom-top)*value/maxHits;g.fillStyle=colors[column];g.fillRect(index*slot+slot*.09+column*(barWidth+gap),bottom-barHeight,barWidth,barHeight)});
+   if(index%Math.max(1,Math.ceil(bars.length/8))===0){g.fillStyle='#777';g.font='8px ui-monospace';g.textAlign='center';g.fillText(new Date(bar.time*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}),index*slot+slot*.5,height-5)}
+ });
+}
+
+function ensurePressureViewToggle(){
+ const box=document.querySelector('#view-pressure.on #pressureHistogram'),head=box?.querySelector('.pressureHistogramHead');
+ if(!box||!head)return;
+ let button=head.querySelector('.pressureViewToggle');
+ if(!button){
+   button=document.createElement('button');button.type='button';button.className='pressureViewToggle';button.onclick=()=>{
+     pressureMetricsOnly=!pressureMetricsOnly;document.body.classList.toggle('pressure-metrics-only',pressureMetricsOnly);
+     button.textContent=pressureMetricsOnly?'MULTIBAR ONLY':'CHART ON';
+     requestAnimationFrame(drawPressureMetricsOnly);
+   };head.appendChild(button);
+ }
+ button.textContent=pressureMetricsOnly?'MULTIBAR ONLY':'CHART ON';
+ document.body.classList.toggle('pressure-metrics-only',pressureMetricsOnly);
+ requestAnimationFrame(drawPressureMetricsOnly);
+}
+setInterval(ensurePressureViewToggle,500);
+
 const novice=el('aside','wsNovice');
 novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT 回答什么？</h4><ul><li><strong>哪几个价位发生最大交换？</strong> 看每根 Bar 的 POC 与 Volume。</li><li><strong>哪边主动成交占优？</strong> 看 Sell@Bid / Buy@Ask / Δ。</li><li><strong>单边成交是否真的推动价格？</strong> 把 Δ 和左边 Candle 的实际价格结果一起看。</li></ul><h4>最重要的判断顺序</h4><p>① 先看 Candle 有没有价格进展。<br>② 再看同一根 Footprint 谁在主动成交。<br>③ 如果成交方向和价格结果背离，切到 Pressure 检查 Absorption。<br>④ CVD 用于确认/背离，不单独作为方向信号。</p><h4>结构标记</h4><p><strong>青框：</strong>单根 Bar POC。<br><strong>橙框：</strong>Diagonal Imbalance。<br><strong>BID ABS：</strong>负 Δ 但 Candle 上涨。<br><strong>OFFER ABS：</strong>正 Δ 但 Candle 下跌。</p><h4>Replay</h4><p>SIM REPLAY 会在背景逐只下载 Alpaca Historical SIP。左侧 ACTIVE 表示该股票整日录像已准备好；INACTIVE 表示仍在下载或排队。准备期间不会锁住主界面。</p>`;
 document.body.appendChild(novice);
