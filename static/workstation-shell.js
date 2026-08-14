@@ -90,22 +90,26 @@ function bindFootprintInteractions(){
    let drag=null,wheelDelta=0;
    surface.addEventListener('wheel',event=>{
      if(event.target.closest('button,select,input'))return;
-     event.preventDefault();const delta=event.deltaY||event.deltaX;
-     if(event.shiftKey){surface.scrollLeft+=delta;return}
-     if(surface.matches('.fpScroller')){
-       wheelDelta+=delta;if(Math.abs(wheelDelta)<55)return;
-       const button=document.querySelector(`#view-footprint .fpCanvasZoom button:${wheelDelta>0?'first':'last'}-child`);
-       button?.click();wheelDelta=0;
-     }else{
-       const scale=Math.max(.65,Math.min(1.55,Number(surface.dataset.fpScale||1)-(delta>0?.08:-.08)));
-       surface.dataset.fpScale=scale.toFixed(2);surface.style.setProperty('--fp-ts-scale',scale.toFixed(2));
+     const delta=event.deltaY||event.deltaX;
+     if(event.ctrlKey){
+       event.preventDefault();
+       if(surface.matches('.fpScroller')){
+         wheelDelta+=delta;if(Math.abs(wheelDelta)<55)return;
+         const button=document.querySelector(`#view-footprint .fpCanvasZoom button:nth-child(${wheelDelta>0?'1':'2'})`);
+         button?.click();wheelDelta=0;
+       }else{
+         const scale=Math.max(.65,Math.min(1.55,Number(surface.dataset.fpScale||1)-(delta>0?.08:-.08)));
+         surface.dataset.fpScale=scale.toFixed(2);surface.style.setProperty('--fp-ts-scale',scale.toFixed(2));
+       }
+       return;
      }
+     if(event.shiftKey){event.preventDefault();surface.scrollLeft+=delta}
    },{passive:false});
    surface.addEventListener('pointerdown',event=>{
      if(event.button!==0||event.target.closest('button,select,input'))return;
-     drag={id:event.pointerId,x:event.clientX,left:surface.scrollLeft};surface.setPointerCapture?.(event.pointerId);surface.classList.add('is-dragging');
+     drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:surface.scrollLeft,top:surface.scrollTop};surface.setPointerCapture?.(event.pointerId);surface.classList.add('is-dragging');
    });
-   surface.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;surface.scrollLeft=drag.left-(event.clientX-drag.x)});
+   surface.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;surface.scrollLeft=drag.left-(event.clientX-drag.x);surface.scrollTop=drag.top-(event.clientY-drag.y)});
    const stop=event=>{if(!drag||drag.id!==event.pointerId)return;drag=null;surface.classList.remove('is-dragging');surface.releasePointerCapture?.(event.pointerId)};
    surface.addEventListener('pointerup',stop);surface.addEventListener('pointercancel',stop);
  });

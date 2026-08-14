@@ -25,6 +25,9 @@ $("chartwrap").appendChild(zoom);
 const zoomCanvas=factor=>{const scale=OF.pc.timeScale(),range=scale.getVisibleLogicalRange();if(!range)return;const center=(range.from+range.to)/2,span=Math.max(10,(range.to-range.from)*factor);scale.setVisibleLogicalRange({from:center-span/2,to:center+span/2});OF.drawOverlay()};
 zoom.querySelector('button:first-child').onclick=()=>zoomCanvas(1.25);
 zoom.querySelector('button:last-child').onclick=()=>zoomCanvas(.8);
+const formationReset=document.createElement('button');formationReset.type='button';formationReset.title='Reset Formation to latest';formationReset.textContent='↻';zoom.appendChild(formationReset);
+OF.resetFormationView=()=>{OF.pc.timeScale().scrollToRealTime();OF.cc.timeScale().scrollToRealTime();OF.drawOverlay()};
+formationReset.onclick=()=>OF.resetFormationView();
 
 OF.resizeCanvas=()=>{const el=$('chartwrap'),cv=$('overlay'),r=el.getBoundingClientRect(),dpr=window.devicePixelRatio||1;cv.width=Math.max(1,Math.floor(r.width*dpr));cv.height=Math.max(1,Math.floor(r.height*dpr));cv.style.width=r.width+'px';cv.style.height=r.height+'px';OF.drawOverlay()};
 const p95=a=>{if(!a.length)return 1;const b=[...a].sort((x,y)=>x-y);return b[Math.floor((b.length-1)*.95)]||1};
