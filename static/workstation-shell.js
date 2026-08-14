@@ -153,6 +153,31 @@ function bindFootprintInteractions(){
  });
 }
 setInterval(bindFootprintInteractions,500);
+const footprintCanvasHoverBound=new WeakSet();
+function ensureFootprintPriceTip(){let tip=document.querySelector('.fpPriceTip');if(!tip){tip=document.createElement('div');tip.className='fpPriceTip';document.body.appendChild(tip)}return tip}
+function bindFootprintCanvasHover(){
+ const OF=window.O;
+ document.querySelectorAll('#view-footprint #fpCanvasComp').forEach(canvas=>{
+  if(footprintCanvasHoverBound.has(canvas))return;
+  footprintCanvasHoverBound.add(canvas);
+  canvas.addEventListener('mousemove',event=>{
+   const geometry=OF?.footprintGeometry?.(),host=document.getElementById('fpStudy'),rect=canvas.getBoundingClientRect();
+   if(!geometry?.bars?.length||!host||!rect.width||!rect.height)return;
+   const tip=ensureFootprintPriceTip(),{bars,step,zoom}=geometry,top=30,rowH=19,left=58,bw=126,cellW=39;
+   const x=(event.clientX-rect.left)/zoom,y=(event.clientY-rect.top)/zoom;
+   const lows=bars.map(bar=>Math.round(Number(bar.low)/step)*step),hi=Math.max(...bars.map(bar=>Math.round(Number(bar.high)/step)*step)),lo=Math.min(...lows);
+   const levels=Math.max(1,Math.round((hi-lo)/step)+1),barIndex=Math.floor((x-left)/bw),bar=bars[barIndex],sellLeft=left+barIndex*bw+6+28,buyLeft=sellLeft+cellW+2;
+   const side=x>=sellLeft&&x<=sellLeft+cellW?'SELL@BID':x>=buyLeft&&x<=buyLeft+cellW?'BUY@ASK':'';
+   if(!bar||!side||y<top||y>top+levels*rowH){tip.style.display='none';return}
+   const rounded=Math.round((hi-(y-top-rowH/2)/rowH*step)/step)*step,key=side==='SELL@BID'?'sell':'buy';
+   const level=[...bar.levels.values()].find(item=>Math.abs(Number(item.price)-rounded)<step*.26);
+   tip.innerHTML=`<b>${side}</b><br>Price ${OF.num(rounded,rounded<1?4:2)}<br>${key==='sell'?'Sell':'Buy'} ${OF.num(level?.[key],0)}`;
+   tip.style.left=Math.min(window.innerWidth-tip.offsetWidth-8,event.clientX+12)+'px';tip.style.top=Math.min(window.innerHeight-tip.offsetHeight-8,event.clientY+12)+'px';tip.style.display='block';
+  });
+  canvas.addEventListener('mouseleave',()=>{const tip=document.querySelector('.fpPriceTip');if(tip)tip.style.display='none'});
+ });
+}
+setInterval(bindFootprintCanvasHover,500);
 function followLatestFootprintViews(){document.querySelectorAll('#view-footprint .fpScroller,#view-footprint .fpTsScroll').forEach(surface=>{if(surface.dataset.fpFollowLatest!=='0'){surface.dataset.fpScrollSync='1';surface.scrollLeft=Math.max(0,surface.scrollWidth-surface.clientWidth);requestAnimationFrame(()=>{surface.dataset.fpScrollSync='0'})}})}
 setInterval(followLatestFootprintViews,250);
 

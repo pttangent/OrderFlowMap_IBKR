@@ -25,6 +25,7 @@ from .alpaca_runtime import AlpacaOrderFlowRuntime
 from .history import load_history
 from .replay_runtime import ReplayRuntime
 from .runtime import OrderFlowRuntime
+from .storage import open_readonly
 
 ASSETS = {
     "flow.css",
@@ -104,6 +105,46 @@ class WorkstationServer:
             return datetime.fromtimestamp(self.runtime.start_ns / 1_000_000_000, tz=eastern).date()
         return datetime.now(eastern).date()
 
+    async def _local_previous_close(self, symbol: str, target: date) -> dict[str, Any] | None:
+        """Use the local recording as a read-only fallback for premarket references."""
+        path = getattr(self.runtime, "db_path", None)
+        if not path:
+            return None
+        eastern = ZoneInfo("America/New_York")
+        target_start_ns = int(datetime.combine(target, dtime.min, tzinfo=eastern).timestamp() * 1_000_000_000)
+
+        def query() -> dict[str, Any] | None:
+            try:
+                conn = open_readonly(path)
+                try:
+                    row = conn.execute(
+                        """
+                        SELECT price, ts_ns
+                        FROM raw_trades
+                        WHERE symbol=? AND ts_ns BETWEEN 0 AND ?
+                        ORDER BY ts_ns DESC
+                        LIMIT 1
+                        """,
+                        (symbol, target_start_ns),
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except Exception:
+                return None
+            if row is None or row["price"] is None:
+                return None
+            return {
+                "available": True,
+                "symbol": symbol,
+                "trading_day": target.isoformat(),
+                "session_open": None,
+                "previous_close": float(row["price"]),
+                "source": "local_sqlite_previous_trade",
+                "reference_ts_ns": int(row["ts_ns"]),
+            }
+
+        return await asyncio.to_thread(query)
+
     async def market_reference(self, request: web.Request) -> web.Response:
         symbol = request.query.get("symbol", "").strip().upper()
         if symbol not in self.runtime.symbols:
@@ -115,7 +156,8 @@ class WorkstationServer:
         key = self.args.alpaca_key or os.getenv("APCA_API_KEY_ID")
         secret = self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY")
         if not key or not secret:
-            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+            local = await self._local_previous_close(symbol, target)
+            return web.json_response(local or {"available": False, "symbol": symbol, "trading_day": target.isoformat()})
         eastern = ZoneInfo("America/New_York")
         start = datetime.combine(target - timedelta(days=10), dtime.min, tzinfo=eastern).astimezone(timezone.utc)
         end = datetime.combine(target + timedelta(days=1), dtime.min, tzinfo=eastern).astimezone(timezone.utc)
@@ -137,10 +179,12 @@ class WorkstationServer:
                     headers=headers,
                 ) as response:
                     if response.status != 200:
-                        return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+                        local = await self._local_previous_close(symbol, target)
+                        return web.json_response(local or {"available": False, "symbol": symbol, "trading_day": target.isoformat()})
                     rows = (await response.json()).get("bars", [])
         except Exception:
-            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+            local = await self._local_previous_close(symbol, target)
+            return web.json_response(local or {"available": False, "symbol": symbol, "trading_day": target.isoformat()})
         parsed: list[tuple[date, dict[str, Any]]] = []
         for row in rows:
             try:
@@ -152,7 +196,8 @@ class WorkstationServer:
         current = next((row for day, row in reversed(parsed) if day == target), None)
         previous = next((row for day, row in reversed(parsed) if day < target), None)
         if current is None or previous is None:
-            return web.json_response({"available": False, "symbol": symbol, "trading_day": target.isoformat()})
+            local = await self._local_previous_close(symbol, target)
+            return web.json_response(local or {"available": False, "symbol": symbol, "trading_day": target.isoformat()})
         payload = {
             "available": True,
             "symbol": symbol,
