@@ -8,8 +8,13 @@ from dotenv import load_dotenv
 
 # Load credentials from the repository-local .env when present. Existing
 # process environment variables win, so explicit deployment configuration is
-# never overwritten by a local file.
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+# never overwritten by a local file. Scan parent directories so a detached
+# worktree can still use the repository root's .env during local development.
+_env_candidates = [Path.cwd() / ".env", *(parent / ".env" for parent in Path(__file__).resolve().parents)]
+for _env_path in _env_candidates:
+    if _env_path.is_file():
+        load_dotenv(_env_path, override=False)
+        break
 
 # Accept the longer ALPACA_* spelling as a convenience for existing local
 # configuration while keeping the APCA_* names used by the Alpaca SDKs.
