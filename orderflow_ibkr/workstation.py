@@ -259,22 +259,24 @@ class WorkstationServer:
         if any(not re.fullmatch(r"[A-Z][A-Z.\-]{0,9}", symbol) for symbol in symbols):
             raise web.HTTPBadRequest(text="One or more symbols use an invalid US equity format")
 
-        # Alpaca's historical endpoint gives a deterministic, provider-neutral
-        # preflight for the US equity symbols before disrupting the current mode.
-        try:
-            validation_day = await latest_completed_trading_day(
-                api_key=self.args.alpaca_key,
-                api_secret=self.args.alpaca_secret,
-            )
-            for symbol in symbols:
-                await validate_replay_request(
-                    symbol=symbol,
-                    trading_day=validation_day,
+        # Alpaca's historical endpoint is only relevant when switching to
+        # Alpaca.  IBKR/TWS must be able to switch with Alpaca credentials
+        # unset; its readiness is determined by the TWS socket connection.
+        if provider == "alpaca":
+            try:
+                validation_day = await latest_completed_trading_day(
                     api_key=self.args.alpaca_key,
                     api_secret=self.args.alpaca_secret,
                 )
-        except (ValueError, RuntimeError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
+                for symbol in symbols:
+                    await validate_replay_request(
+                        symbol=symbol,
+                        trading_day=validation_day,
+                        api_key=self.args.alpaca_key,
+                        api_secret=self.args.alpaca_secret,
+                    )
+            except (ValueError, RuntimeError) as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from exc
 
         if self.replay_prepare_task and not self.replay_prepare_task.done():
             self.replay_prepare_task.cancel()
