@@ -23,8 +23,18 @@ novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT
 document.body.appendChild(novice);
 
 const modal=el('div','wsReplayModal');
-modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>准备单一交易日</h2><p class="wsReplayLead">输入一只美股与交易日。确认前会验证 symbol，以及该日的 Alpaca SIP trades / quotes 是否可取得。</p><label>Symbol</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA"><label>Replay date</label><input id="wsReplayDate" class="wsReplayInput" type="date"><div class="wsReplayHint" id="wsReplayHint">只允许 1 只股票；验证失败请重新输入。</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">VALIDATE & PREPARE</button></div>`;
+modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>准备单一交易日</h2><p class="wsReplayLead">输入一只美股与交易日。确认前会验证 symbol，以及该日的 Alpaca SIP trades / quotes 是否可取得。</p><label>Symbol</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA"><label>Replay date</label><div class="wsDatePicker"><button type="button" id="wsReplayPrev" aria-label="前一天" title="前一天">‹</button><input id="wsReplayDate" class="wsReplayInput" type="date"><button type="button" id="wsReplayNext" aria-label="後一天" title="後一天">›</button></div><div class="wsReplayHint" id="wsReplayHint">預設今天；可用左右箭頭或日曆切換日期。只允许 1 只股票；验证失败请重新输入。</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">VALIDATE & PREPARE</button></div>`;
 document.body.appendChild(modal);
+
+function localDateValue(date=new Date()){
+ const d=new Date(date);d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,10);
+}
+function shiftReplayDate(days){
+ const input=document.getElementById('wsReplayDate');let base=input.value?new Date(`${input.value}T12:00:00`):new Date();
+ base.setDate(base.getDate()+days);const today=new Date();today.setHours(12,0,0,0);if(base>today)base=today;input.value=localDateValue(base);
+}
+document.getElementById('wsReplayPrev').onclick=()=>shiftReplayDate(-1);
+document.getElementById('wsReplayNext').onclick=()=>shiftReplayDate(1);
 
 const liveModal=el('div','wsReplayModal');
 liveModal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsLiveClose">×</button><div class="wsReplayKicker">LIVE MARKET DATA</div><h2>切换到 LIVE</h2><p class="wsReplayLead">选择数据源并输入最多 5 只美股。确认前会验证 symbols；切换会停止当前 Replay。</p><label>Source</label><select id="wsLiveProvider" class="wsReplayInput"><option value="ibkr">TWS / IBKR</option><option value="alpaca">Alpaca WebSocket</option></select><label>Symbols</label><input id="wsLiveSymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA AAPL MSFT"><div class="wsReplayError" id="wsLiveError"></div><button class="wsReplayStart" id="wsLiveStart">VALIDATE & SWITCH LIVE</button></div>`;
@@ -103,8 +113,9 @@ function renderPrepUniverse(s=prepareInfo){
 
 function openReplayModal(){
  document.getElementById('wsReplayError').textContent='';modal.classList.add('on');
+ const dateInput=document.getElementById('wsReplayDate');if(!dateInput.value)dateInput.value=localDateValue();dateInput.max=localDateValue();
  fetch('/api/replay/prepare',{cache:'no-store'}).then(r=>r.json()).then(info=>{
-   prepareInfo=info;const cap=Number(info.symbol_cap||5);document.getElementById('wsReplayHint').textContent=`最多 ${cap} 只；逐只完整下载，完成后左侧变为 ACTIVE。`;
+   prepareInfo=info;const cap=Number(info.symbol_cap||1);document.getElementById('wsReplayHint').textContent=`預設今天；可用左右箭頭或日曆切換日期。只允许 ${cap} 只股票，送出前会验证该日资料。`;
    const current=(info.current_symbols||snapshot?.status?.symbols||[]).slice(0,cap);if(!document.getElementById('wsReplaySymbols').value)document.getElementById('wsReplaySymbols').value=current.join(' ');
    document.getElementById('wsReplayCredentials').style.display=info.credentials_configured?'none':'block';renderPrepUniverse(info);
  }).catch(()=>{});
