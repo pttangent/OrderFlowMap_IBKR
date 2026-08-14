@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
   "ib-async==2.0.1",
   "aiohttp>=3.10,<4",
+  "python-dotenv>=1,<2",
 ]
 
 [project.optional-dependencies]

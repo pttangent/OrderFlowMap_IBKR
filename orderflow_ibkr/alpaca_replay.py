@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -25,6 +25,7 @@ LATEST_DATA_DELAY_MIN = 16
 CACHE_META_PREFIX = "replay_symbol_complete:"
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+SymbolReadyCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -397,6 +398,7 @@ async def build_previous_session_replay(
     api_secret: str | None = None,
     speed: float = 1.0,
     on_progress: ProgressCallback | None = None,
+    on_symbol_ready: SymbolReadyCallback | None = None,
 ) -> PreparedReplay:
     symbols = clean_replay_symbols(symbols)
     key, secret = _credentials(api_key, api_secret)
@@ -435,8 +437,18 @@ async def build_previous_session_replay(
                     "cache_hit": True,
                     "cached_symbols": list(cached_symbols),
                     "downloaded_symbols": list(downloaded_symbols),
+                    "ready_symbols": list(dict.fromkeys([*cached_symbols, *downloaded_symbols])),
                 }
             )
+            if on_symbol_ready is not None:
+                await on_symbol_ready(
+                    {
+                        "session_id": cache_session,
+                        "db_path": str(path),
+                        "trading_day": trading_day.isoformat(),
+                        "ready_symbols": list(dict.fromkeys([*cached_symbols, *downloaded_symbols])),
+                    }
+                )
             continue
 
         notify(
@@ -475,6 +487,27 @@ async def build_previous_session_replay(
             symbol=symbol,
         )
         downloaded_symbols.append(symbol)
+        ready_symbols = list(dict.fromkeys([*cached_symbols, *downloaded_symbols]))
+        notify(
+            {
+                "stage": "symbol_ready",
+                "symbols": [symbol],
+                "all_symbols": symbols,
+                "trading_day": trading_day.isoformat(),
+                "cached_symbols": list(cached_symbols),
+                "downloaded_symbols": list(downloaded_symbols),
+                "ready_symbols": ready_symbols,
+            }
+        )
+        if on_symbol_ready is not None:
+            await on_symbol_ready(
+                {
+                    "session_id": cache_session,
+                    "db_path": str(path),
+                    "trading_day": trading_day.isoformat(),
+                    "ready_symbols": ready_symbols,
+                }
+            )
 
         # record_day has its own request pacer. Keep a small inter-symbol gap so
         # restarting that pacer cannot create a boundary burst near 200 RPM.
@@ -517,6 +550,7 @@ async def build_previous_session_replay(
             "requests": stats.requests,
             "cached_symbols": cached_symbols,
             "downloaded_symbols": downloaded_symbols,
+            "ready_symbols": list(dict.fromkeys([*cached_symbols, *downloaded_symbols])),
             "cache_hit": not downloaded_symbols,
             "download_strategy": "sequential_per_symbol",
         }

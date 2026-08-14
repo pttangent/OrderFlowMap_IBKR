@@ -33,7 +33,10 @@ class AlpacaOrderFlowRuntime(OrderFlowRuntime):
             ib_host="stream.data.alpaca.markets",
             ib_port=443,
             client_id=0,
-            market_data_lines=max(1, len(symbols)),
+            # The common runtime constructs a temporary IBKR plan before the
+            # Alpaca adapter replaces it. Give that plan the normal 100-line
+            # budget so Alpaca can start with the five-symbol replay universe.
+            market_data_lines=100,
         )
         self.provider = "alpaca"
         self.alpaca_feed = feed

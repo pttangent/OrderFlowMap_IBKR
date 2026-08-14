@@ -85,3 +85,58 @@ def test_replay_events_are_globally_timestamp_sorted(tmp_path: Path) -> None:
         await r.stop()
 
     asyncio.run(run())
+
+
+def test_seek_snapshot_contains_rebuilt_history(tmp_path: Path) -> None:
+    db = tmp_path / "recording.sqlite"
+    _build_recording(db)
+
+    async def run() -> None:
+        r = ReplayRuntime(symbols=["XE", "SNDK"], db_path=db, duration_sec=60)
+        await r.start()
+        await r.seek(r.start_ns + 2_000_000_000)
+        snap = r.snapshot(include_history=True)
+        assert snap["replay_history"]["quotes"]["XE"]
+        assert snap["replay_history"]["trades"]["SNDK"]
+        assert max(row["ts_ns"] for row in snap["replay_history"]["trades"]["XE"]) <= r.market_time_ns
+        await r.stop()
+
+    asyncio.run(run())
+
+
+def test_concurrent_seeks_are_serialized(tmp_path: Path) -> None:
+    db = tmp_path / "recording.sqlite"
+    _build_recording(db)
+
+    async def run() -> None:
+        r = ReplayRuntime(symbols=["XE", "SNDK"], db_path=db, duration_sec=60)
+        await r.start()
+        await asyncio.gather(
+            r.seek(r.start_ns + 1_000_000_000),
+            r.seek(r.start_ns + 2_000_000_000),
+        )
+        assert r.start_ns <= r.market_time_ns <= r.end_ns
+        assert r.latest_quotes and r.latest_trades
+        await r.stop()
+
+    asyncio.run(run())
+
+
+def test_playback_batches_events_for_the_ui(tmp_path: Path) -> None:
+    db = tmp_path / "recording.sqlite"
+    _build_recording(db)
+
+    async def run() -> None:
+        r = ReplayRuntime(symbols=["XE", "SNDK"], db_path=db, duration_sec=60, speed=100)
+        await r.start()
+        await r.play()
+        await asyncio.sleep(0.15)
+        await r.pause()
+        payloads = []
+        while not r.event_queue.empty():
+            payloads.append(r.event_queue.get_nowait())
+        assert any(item["type"] == "replay_batch" for item in payloads)
+        assert not any(item["type"] in {"quote", "trade"} for item in payloads)
+        await r.stop()
+
+    asyncio.run(run())

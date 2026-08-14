@@ -37,6 +37,7 @@ class WorkstationServer:
         self.clients: set[web.WebSocketResponse] = set()
         self.broadcaster: asyncio.Task | None = None
         self.replay_prepare_task: asyncio.Task | None = None
+        self.replay_speed = 1.0
         self.replay_prepare_state: dict[str, Any] = {
             "state": "idle",
             "symbol_cap": REPLAY_SYMBOL_CAP,
@@ -51,7 +52,6 @@ class WorkstationServer:
             )
             html = html.replace(
                 "</body>",
-                '<script src="/static/footprint-timeseries.js"></script>'
                 '<script src="/static/workstation-shell.js"></script></body>',
             )
         return web.Response(
@@ -82,6 +82,9 @@ class WorkstationServer:
         return web.json_response(self.runtime.status)
 
     async def snapshot(self, request: web.Request) -> web.Response:
+        include_history = request.query.get("include_history") == "1"
+        if isinstance(self.runtime, ReplayRuntime):
+            return web.json_response(self.runtime.snapshot(include_history=include_history))
         return web.json_response(self.runtime.snapshot())
 
     @staticmethod
@@ -226,9 +229,48 @@ class WorkstationServer:
                 pass
         self.broadcaster = asyncio.create_task(self.broadcast_loop())
 
+    async def _activate_replay_symbols(self, payload: dict[str, Any]) -> None:
+        symbols = [str(symbol).upper() for symbol in payload.get("ready_symbols", [])]
+        if not symbols:
+            return
+        old_runtime = self.runtime
+        previous = old_runtime.replay_state() if isinstance(old_runtime, ReplayRuntime) else None
+        replay = ReplayRuntime(
+            symbols=symbols,
+            db_path=payload["db_path"],
+            source_session=payload["session_id"],
+            duration_sec=24 * 60 * 60,
+            speed=self.replay_speed,
+        )
+        await replay.start()
+        if previous is not None:
+            await replay.seek(int(previous.get("market_time_ns") or replay.start_ns))
+            if previous.get("playing"):
+                await replay.play()
+        self.runtime = replay
+        await self._restart_broadcaster()
+        if old_runtime is not replay:
+            await old_runtime.stop()
+        self.replay_prepare_state.update(
+            {
+                "active_symbols": symbols,
+                "ready_symbols": symbols,
+                "runtime_mode": "REPLAY",
+                "session_id": payload["session_id"],
+                "trading_day": payload["trading_day"],
+                "replay_db": str(Path(payload["db_path"]).resolve()),
+            }
+        )
+        await self._push_snapshot_to_clients()
+
     async def _push_snapshot_to_clients(self) -> None:
+        data = (
+            self.runtime.snapshot(include_history=True)
+            if isinstance(self.runtime, ReplayRuntime)
+            else self.runtime.snapshot()
+        )
         payload = json.dumps(
-            {"type": "snapshot", "data": self.runtime.snapshot()},
+            {"type": "snapshot", "data": data},
             separators=(",", ":"),
             default=str,
         )
@@ -264,6 +306,7 @@ class WorkstationServer:
                 api_secret=api_secret,
                 speed=1.0,
                 on_progress=progress,
+                on_symbol_ready=self._activate_replay_symbols,
             )
             new_runtime = prepared.runtime
             self.replay_prepare_state.update(
@@ -277,11 +320,11 @@ class WorkstationServer:
                 }
             )
 
-            old_runtime = self.runtime
-            await old_runtime.stop()
-            self.runtime = new_runtime
-            await self._restart_broadcaster()
-            await self._push_snapshot_to_clients()
+            # The callback already activates each ready symbol incrementally.
+            # The builder returns a final all-symbol runtime as a convenience;
+            # keep the callback-managed runtime and dispose of this duplicate.
+            if new_runtime is not self.runtime:
+                await new_runtime.stop()
             self.replay_prepare_state.update(
                 {
                     "state": "ready",
@@ -293,6 +336,9 @@ class WorkstationServer:
                     "trades": prepared.stats.trades,
                     "requests": prepared.stats.requests,
                     "replay_db": str(prepared.db_path.resolve()),
+                    "active_symbols": list(symbols),
+                    "ready_symbols": list(symbols),
+                    "runtime_mode": "REPLAY",
                 }
             )
             new_runtime = None

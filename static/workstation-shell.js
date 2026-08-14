@@ -32,9 +32,9 @@ const universe=document.getElementById('universe');
 if(universe?.parentElement)universe.parentElement.appendChild(prepPane);
 
 function ensureMetrics(){
- let host=document.getElementById('wsMetrics');if(host)return host;
+ let host=document.getElementById('wsMetrics');if(host){const center=$('.center');if(center)center.style.gridTemplateRows='38px auto minmax(0,1fr)';return host}
  host=el('div','wsMetrics');host.id='wsMetrics';host.innerHTML=`<div class="wsMetric"><span>Window Delta</span><b id="wmDelta">—</b></div><div class="wsMetric"><span>Price Move</span><b id="wmMove">—</b></div><div class="wsMetric"><span>Agg Buy</span><b id="wmBuy">—</b></div><div class="wsMetric"><span>Agg Sell</span><b id="wmSell">—</b></div>`;
- const center=$('.center');const viewBar=$('.viewBar');if(center&&viewBar)center.insertBefore(host,viewBar.nextSibling);else if(center)center.prepend(host);return host;
+ const center=$('.center');const viewBar=$('.viewBar');if(center&&viewBar){center.insertBefore(host,viewBar.nextSibling);center.style.gridTemplateRows='38px auto minmax(0,1fr)'}else if(center)center.prepend(host);return host;
 }
 function renderMetrics(){
  ensureMetrics();const m=selectedMetrics();if(!m)return;
@@ -47,9 +47,9 @@ function marketPrice(){
  const s=selectedSymbol();if(!s)return'—';
  const t=snapshot?.trades?.[s]||window.OF?.latest?.(s,'trade');
  const q=snapshot?.quotes?.[s]||window.OF?.latest?.(s,'quote');
- let p=Number(t?.price);if(!Number.isFinite(p))p=Number(q?.last);
- if(!Number.isFinite(p)){const bid=Number(q?.bid),ask=Number(q?.ask);if(Number.isFinite(bid)&&Number.isFinite(ask))p=(bid+ask)/2}
- return Number.isFinite(p)?`${s}  $${p.toFixed(2)}`:`${s}  —`;
+ let p=Number(t?.price);if(!(Number.isFinite(p)&&p>0))p=Number(q?.last);
+ if(!(Number.isFinite(p)&&p>0)){const bid=Number(q?.bid),ask=Number(q?.ask);if(bid>0&&ask>0)p=(bid+ask)/2}
+ return Number.isFinite(p)&&p>0?`${s}  $${p.toFixed(2)}`:`${s}  —`;
 }
 function renderReplay(){
  const isReplay=isReplayMode();document.getElementById('wsMode').textContent=isReplay?'REPLAY':'LIVE';bar.classList.toggle('on',isReplay);
@@ -69,8 +69,8 @@ function prepSymbols(s){
  return [...new Set(values.map(x=>String(x).toUpperCase()))];
 }
 function prepReadySet(s,syms){
- if(s?.state==='ready'||isReplayMode())return new Set(syms);
- return new Set([...(s?.cached_symbols||[]),...(s?.downloaded_symbols||[])].map(x=>String(x).toUpperCase()));
+ const ready=s?.ready_symbols||s?.active_symbols||[...(s?.cached_symbols||[]),...(s?.downloaded_symbols||[])];
+ return new Set(ready.map(x=>String(x).toUpperCase()));
 }
 function renderPrepUniverse(s=prepareInfo){
  const btn=document.getElementById('wsReplayBtn');const hint=document.getElementById('uHint');

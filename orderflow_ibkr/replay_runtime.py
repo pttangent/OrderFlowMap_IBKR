@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left
 import json
 import sqlite3
+import threading
 import time
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,10 +45,16 @@ class ReplayRuntime:
         self.latest_metrics: dict[str, dict[str, Any]] = {}
         self.latest_quotes: dict[str, dict[str, Any]] = {}
         self.latest_trades: dict[str, dict[str, Any]] = {}
+        self.history_quotes: dict[str, list[dict[str, Any]]] = {}
+        self.history_trades: dict[str, list[dict[str, Any]]] = {}
+        self.history_metrics: dict[str, list[dict[str, Any]]] = {}
         self.status: dict[str, Any] = {"state": "starting", "runtime_mode": "REPLAY"}
         self._events: list[tuple[int, int, str, str, dict[str, Any]]] = []
+        self._event_times: list[int] = []
         self._index = 0
         self._play_task: asyncio.Task | None = None
+        self._seek_lock = asyncio.Lock()
+        self._engine_lock = threading.RLock()
         self._playing = False
         self._last_metric_ns: dict[str, int] = {}
         self._last_ranking_ns = 0
@@ -161,6 +168,7 @@ class ReplayRuntime:
         if not events:
             raise RuntimeError("Replay interval contains no events")
         self._events = events
+        self._event_times = [event[0] for event in events]
         self.start_ns = events[0][0]
         self.end_ns = events[-1][0]
         self.market_time_ns = self.start_ns
@@ -170,12 +178,27 @@ class ReplayRuntime:
         self.latest_metrics.clear()
         self.latest_quotes.clear()
         self.latest_trades.clear()
+        self.history_quotes.clear()
+        self.history_trades.clear()
+        self.history_metrics.clear()
         self._last_metric_ns.clear()
         self._last_ranking_ns = 0
         self._index = 0
         self.market_time_ns = self.start_ns
 
-    def _emit_quote(self, symbol: str, row: dict[str, Any]) -> None:
+    @staticmethod
+    def _append_history(
+        target: dict[str, list[dict[str, Any]]],
+        symbol: str,
+        row: dict[str, Any],
+        limit: int,
+    ) -> None:
+        rows = target.setdefault(symbol, [])
+        rows.append(row)
+        if len(rows) > limit:
+            del rows[:-limit]
+
+    def _emit_quote(self, symbol: str, row: dict[str, Any], *, publish: bool = True) -> dict[str, Any]:
         raw_source = str(row.get("source") or "RECORDED_QUOTE")
         quote = QuoteEvent(
             ts_ns=int(row["ts_ns"]),
@@ -195,16 +218,32 @@ class ReplayRuntime:
         )
         self.engine.state(symbol).add_quote(quote)
         out = {
-            **asdict(quote),
+            "ts_ns": quote.ts_ns,
+            "bid": quote.bid,
+            "ask": quote.ask,
+            "bid_size": quote.bid_size,
+            "ask_size": quote.ask_size,
+            "last": quote.last,
+            "last_size": quote.last_size,
+            "volume": quote.volume,
+            "vwap": quote.vwap,
+            "trade_count": quote.trade_count,
+            "trade_rate": quote.trade_rate,
+            "volume_rate": quote.volume_rate,
+            "source": quote.source,
+            "quality": quote.quality,
             "session_id": self.session_id,
             "symbol": symbol,
             "source_session": self.source_session,
         }
         self.latest_quotes[symbol] = out
-        self._publish({"type": "quote", "symbol": symbol, "data": out})
-        self._maybe_compute(symbol, quote.ts_ns)
+        self._append_history(self.history_quotes, symbol, out, 7000)
+        if publish:
+            self._publish({"type": "quote", "symbol": symbol, "data": out})
+        self._maybe_compute(symbol, quote.ts_ns, publish=publish)
+        return out
 
-    def _emit_trade(self, symbol: str, row: dict[str, Any]) -> None:
+    def _emit_trade(self, symbol: str, row: dict[str, Any], *, publish: bool = True) -> dict[str, Any]:
         try:
             conditions = json.loads(row.get("conditions_json") or "[]")
         except Exception:
@@ -223,17 +262,31 @@ class ReplayRuntime:
         )
         self.engine.state(symbol).add_trade(trade)
         out = {
-            **asdict(trade),
+            "ts_ns": trade.ts_ns,
+            "price": trade.price,
+            "size": trade.size,
+            "exchange": trade.exchange,
+            "conditions": trade.conditions,
+            "aggressor": trade.aggressor,
+            "aggressor_confidence": trade.aggressor_confidence,
+            "source": trade.source,
+            "quality": trade.quality,
             "session_id": self.session_id,
             "symbol": symbol,
             "source_session": self.source_session,
         }
         self.latest_trades[symbol] = out
-        self._publish({"type": "trade", "symbol": symbol, "data": out})
-        self._maybe_compute(symbol, trade.ts_ns)
+        self._append_history(self.history_trades, symbol, out, 7000)
+        if publish:
+            self._publish({"type": "trade", "symbol": symbol, "data": out})
+        self._maybe_compute(symbol, trade.ts_ns, publish=publish)
+        return out
 
-    def _maybe_compute(self, symbol: str, now_ns: int) -> None:
-        if now_ns - self._last_metric_ns.get(symbol, 0) < 1_000_000_000:
+    def _maybe_compute(self, symbol: str, now_ns: int, *, publish: bool = True) -> None:
+        # Keep metrics at a useful UI cadence. At high replay speeds, computing
+        # every simulated second wastes CPU without producing a visible update.
+        metric_interval_ns = max(1_000_000_000, int(self.speed * 100_000_000))
+        if now_ns - self._last_metric_ns.get(symbol, 0) < metric_interval_ns:
             return
         self._last_metric_ns[symbol] = now_ns
         metrics = self.engine.state(symbol).metrics(
@@ -242,19 +295,21 @@ class ReplayRuntime:
             quality=self.plan.quality,
         )
         self.latest_metrics[symbol] = metrics
-        footprint = self.engine.state(symbol).footprint(
-            now_ns=now_ns,
-            sec=300,
-            tick_size=0.01,
-        )
-        self._publish(
-            {
-                "type": "metrics",
-                "symbol": symbol,
-                "data": metrics,
-                "footprint": footprint[:120],
-            }
-        )
+        self._append_history(self.history_metrics, symbol, metrics, 3500)
+        if publish:
+            footprint = self.engine.state(symbol).footprint(
+                now_ns=now_ns,
+                sec=300,
+                tick_size=0.01,
+            )
+            self._publish(
+                {
+                    "type": "metrics",
+                    "symbol": symbol,
+                    "data": metrics,
+                    "footprint": footprint[:120],
+                }
+            )
         if now_ns - self._last_ranking_ns >= 2_000_000_000:
             self._last_ranking_ns = now_ns
             items = sorted(
@@ -262,53 +317,113 @@ class ReplayRuntime:
                 key=lambda item: item[1].get("score", 0.0),
                 reverse=True,
             )
-            self._publish(
-                {
-                    "type": "ranking",
-                    "data": [
-                        {
-                            "session_id": self.session_id,
-                            "symbol": current_symbol,
-                            "ts_ns": now_ns,
-                            "rank": rank,
-                            "score": current.get("score", 0.0),
-                            "activity_score": current.get("activity_score", 0.0),
-                            "flow_score": current.get("flow_score", 50.0),
-                            "absorption_score": current.get("absorption_score", 0.0),
-                            "quality": current.get("quality", self.plan.quality),
-                        }
-                        for rank, (current_symbol, current) in enumerate(items, 1)
-                    ],
-                }
-            )
+            if publish:
+                self._publish(
+                    {
+                        "type": "ranking",
+                        "data": [
+                            {
+                                "session_id": self.session_id,
+                                "symbol": current_symbol,
+                                "ts_ns": now_ns,
+                                "rank": rank,
+                                "score": current.get("score", 0.0),
+                                "activity_score": current.get("activity_score", 0.0),
+                                "flow_score": current.get("flow_score", 50.0),
+                                "absorption_score": current.get("absorption_score", 0.0),
+                                "quality": current.get("quality", self.plan.quality),
+                            }
+                            for rank, (current_symbol, current) in enumerate(items, 1)
+                        ],
+                    }
+                )
 
-    def _step_one(self) -> bool:
-        if self._index >= len(self._events):
-            return False
-        ts_ns, _, symbol, kind, row = self._events[self._index]
-        self._index += 1
-        self.market_time_ns = ts_ns
-        if kind == "quote":
-            self._emit_quote(symbol, row)
-        else:
-            self._emit_trade(symbol, row)
-        return True
+    def _step_one(self, *, publish: bool = True) -> tuple[str, str, dict[str, Any]] | None:
+        with self._engine_lock:
+            if self._index >= len(self._events):
+                return None
+            ts_ns, _, symbol, kind, row = self._events[self._index]
+            self._index += 1
+            self.market_time_ns = ts_ns
+            if kind == "quote":
+                return kind, symbol, self._emit_quote(symbol, row, publish=publish)
+            return kind, symbol, self._emit_trade(symbol, row, publish=publish)
+
+    def _rebuild_to_target(self, target_ns: int) -> None:
+        with self._engine_lock:
+            self._reset_state()
+            # A seek only needs the recent window used by metrics/footprint.
+            # Replaying the entire multi-million-event session made a slider
+            # move effectively unusable.
+            rebuild_from = max(self.start_ns, target_ns - 300 * 1_000_000_000)
+            self._index = bisect_left(self._event_times, rebuild_from)
+            while self._index < len(self._events) and self._events[self._index][0] <= target_ns:
+                self._step_one(publish=False)
+            self.market_time_ns = target_ns
 
     async def _play_loop(self) -> None:
         try:
+            loop = asyncio.get_running_loop()
+            wall_start = loop.time()
+            market_start = self.market_time_ns
+            next_flush = wall_start
+            quotes: dict[str, dict[str, Any]] = {}
+            trades: dict[str, list[dict[str, Any]]] = {}
             while self._playing and self._index < len(self._events):
-                current_ts = self._events[self._index][0]
-                previous_ts = self.market_time_ns or current_ts
-                delay = max(
-                    0.0,
-                    (current_ts - previous_ts) / 1_000_000_000 / self.speed,
-                )
-                if delay:
-                    # 1x means one market second equals one wall-clock second.
-                    await asyncio.sleep(delay)
-                if not self._playing:
+                target_ns = market_start + int((loop.time() - wall_start) * 1_000_000_000 * self.speed)
+                processed = 0
+                while self._playing and self._index < len(self._events) and self._events[self._index][0] <= target_ns:
+                    event = self._step_one(publish=False)
+                    if event is None:
+                        break
+                    kind, symbol, data = event
+                    if kind == "quote":
+                        quotes[symbol] = data
+                    else:
+                        trades.setdefault(symbol, []).append(data)
+                    processed += 1
+                    # Let HTTP controls and the websocket writer run even at high speed.
+                    if processed >= 2_000:
+                        break
+
+                now = loop.time()
+                if now >= next_flush:
+                    self._publish(
+                        {
+                            "type": "replay_batch",
+                            "data": {
+                                "quotes": quotes,
+                                "trades": trades,
+                                "metrics": {symbol: dict(data) for symbol, data in self.latest_metrics.items()},
+                                "replay": self.replay_state(),
+                            },
+                        }
+                    )
+                    quotes = {}
+                    trades = {}
+                    next_flush = now + 0.10
+
+                if self._index >= len(self._events) or not self._playing:
                     break
-                self._step_one()
+                next_ts = self._events[self._index][0]
+                delay = (next_ts - target_ns) / 1_000_000_000 / self.speed
+                if delay > 0:
+                    await asyncio.sleep(min(0.05, max(0.001, delay)))
+                else:
+                    await asyncio.sleep(0)
+
+            if quotes or trades:
+                self._publish(
+                    {
+                        "type": "replay_batch",
+                        "data": {
+                            "quotes": quotes,
+                            "trades": trades,
+                            "metrics": {symbol: dict(data) for symbol, data in self.latest_metrics.items()},
+                            "replay": self.replay_state(),
+                        },
+                    }
+                )
             if self._index >= len(self._events):
                 self._playing = False
                 self._publish({"type": "replay", "data": self.replay_state()})
@@ -316,31 +431,34 @@ class ReplayRuntime:
             raise
 
     async def play(self) -> None:
+        async with self._seek_lock:
+            self._start_playing()
+
+    def _start_playing(self) -> None:
         self._playing = True
         if not self._play_task or self._play_task.done():
             self._play_task = asyncio.create_task(self._play_loop())
         self._publish({"type": "replay", "data": self.replay_state()})
 
     async def pause(self) -> None:
-        self._playing = False
-        self._publish({"type": "replay", "data": self.replay_state()})
+        async with self._seek_lock:
+            self._playing = False
+            self._publish({"type": "replay", "data": self.replay_state()})
 
     async def set_speed(self, speed: float) -> None:
         self.speed = max(0.01, min(float(speed), 1000.0))
         self._publish({"type": "replay", "data": self.replay_state()})
 
     async def seek(self, target_ns: int) -> None:
-        was_playing = self._playing
-        self._playing = False
-        self._reset_state()
-        target_ns = max(self.start_ns, min(int(target_ns), self.end_ns))
-        while self._index < len(self._events) and self._events[self._index][0] <= target_ns:
-            self._step_one()
-        self.market_time_ns = target_ns
-        self._publish({"type": "snapshot", "data": self.snapshot()})
-        self._publish({"type": "replay", "data": self.replay_state()})
-        if was_playing:
-            await self.play()
+        async with self._seek_lock:
+            was_playing = self._playing
+            self._playing = False
+            target_ns = max(self.start_ns, min(int(target_ns), self.end_ns))
+            await asyncio.to_thread(self._rebuild_to_target, target_ns)
+            self._publish({"type": "snapshot", "data": self.snapshot(include_history=True)})
+            self._publish({"type": "replay", "data": self.replay_state()})
+            if was_playing:
+                self._start_playing()
 
     async def next_bar(self, seconds: int = 30) -> None:
         await self.seek(self.market_time_ns + seconds * 1_000_000_000)
@@ -349,7 +467,7 @@ class ReplayRuntime:
         await self.seek(self.market_time_ns - seconds * 1_000_000_000)
 
     async def start(self) -> None:
-        self._load_events()
+        await asyncio.to_thread(self._load_events)
         self.status = {
             "state": "running",
             "runtime_mode": "REPLAY",
@@ -378,37 +496,47 @@ class ReplayRuntime:
                 pass
 
     def replay_state(self) -> dict[str, Any]:
-        duration = max(1, self.end_ns - self.start_ns)
-        progress = max(
-            0.0,
-            min(1.0, (self.market_time_ns - self.start_ns) / duration),
-        )
-        return {
-            "runtime_mode": "REPLAY",
-            "playing": self._playing,
-            "speed": self.speed,
-            "market_time_ns": self.market_time_ns,
-            "start_ns": self.start_ns,
-            "end_ns": self.end_ns,
-            "progress": progress,
-            "index": self._index,
-            "events": len(self._events),
-            "source_session": self.source_session,
-            "source_provider": self.source_provider,
-            "quality": self.plan.quality,
-            "read_only": True,
-        }
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "status": {
-                **self.status,
+        with self._engine_lock:
+            duration = max(1, self.end_ns - self.start_ns)
+            progress = max(
+                0.0,
+                min(1.0, (self.market_time_ns - self.start_ns) / duration),
+            )
+            return {
+                "runtime_mode": "REPLAY",
+                "playing": self._playing,
+                "speed": self.speed,
                 "market_time_ns": self.market_time_ns,
-                "replay": self.replay_state(),
-            },
-            "quotes": self.latest_quotes,
-            "trades": self.latest_trades,
-            "metrics": self.latest_metrics,
-            "writer": {"written": 0, "dropped": 0},
-            "replay": self.replay_state(),
-        }
+                "start_ns": self.start_ns,
+                "end_ns": self.end_ns,
+                "progress": progress,
+                "index": self._index,
+                "events": len(self._events),
+                "source_session": self.source_session,
+                "source_provider": self.source_provider,
+                "quality": self.plan.quality,
+                "read_only": True,
+            }
+
+    def snapshot(self, *, include_history: bool = False) -> dict[str, Any]:
+        with self._engine_lock:
+            replay = self.replay_state()
+            payload = {
+                "status": {
+                    **self.status,
+                    "market_time_ns": self.market_time_ns,
+                    "replay": replay,
+                },
+                "quotes": {symbol: dict(row) for symbol, row in self.latest_quotes.items()},
+                "trades": {symbol: dict(row) for symbol, row in self.latest_trades.items()},
+                "metrics": {symbol: dict(row) for symbol, row in self.latest_metrics.items()},
+                "writer": {"written": 0, "dropped": 0},
+                "replay": replay,
+            }
+            if include_history:
+                payload["replay_history"] = {
+                    "quotes": {symbol: [dict(row) for row in rows] for symbol, rows in self.history_quotes.items()},
+                    "trades": {symbol: [dict(row) for row in rows] for symbol, rows in self.history_trades.items()},
+                    "metrics": {symbol: [dict(row) for row in rows] for symbol, rows in self.history_metrics.items()},
+                }
+            return payload

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from orderflow_ibkr.alpaca_adapter import AlpacaAdapter, _quote_size_shares, _rfc3339_to_ns
+from orderflow_ibkr.alpaca_runtime import AlpacaOrderFlowRuntime
 
 
 def test_rfc3339_parser_preserves_nanoseconds() -> None:
@@ -47,3 +50,15 @@ def test_free_live_feed_plan_is_explicitly_iex() -> None:
     assert adapter.plan.active_mode == "alpaca-iex"
     assert adapter.plan.trade_source == "ALPACA_WS_IEX_TRADE"
     assert adapter.plan.quality == "ALPACA_IEX_TRADES_QUOTES"
+
+
+def test_alpaca_runtime_accepts_five_symbol_universe(tmp_path: Path) -> None:
+    runtime = AlpacaOrderFlowRuntime(
+        symbols=["XE", "SNDK", "NVDA", "VST", "GEV"],
+        db_path=tmp_path / "alpaca.sqlite",
+        feed="iex",
+        api_key="k",
+        api_secret="s",
+    )
+    assert runtime.adapter.plan.symbols == ["XE", "SNDK", "NVDA", "VST", "GEV"]
+    assert runtime.adapter.plan.quality == "ALPACA_IEX_TRADES_QUOTES"

@@ -24,7 +24,16 @@ Replay never calls Alpaca over the network. Historical data is downloaded first 
 
 ## Credentials
 
-Use environment variables so credentials never reach browser JavaScript or source control:
+Put credentials in the repository-local `.env` file so they never reach browser JavaScript or source control:
+
+```dotenv
+APCA_API_KEY_ID=your_alpaca_api_key
+APCA_API_SECRET_KEY=your_alpaca_api_secret
+```
+
+The application loads `/Users/pt/DEV/stock_orderflow/.env` automatically. The file is ignored by Git. Existing shell environment variables take precedence. The longer `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` names are also accepted.
+
+You can also use environment variables directly:
 
 ```powershell
 $env:APCA_API_KEY_ID="..."
