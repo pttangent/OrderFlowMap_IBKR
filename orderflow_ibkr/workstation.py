@@ -49,6 +49,8 @@ class WorkstationServer:
         self.broadcaster: asyncio.Task | None = None
         self.replay_prepare_task: asyncio.Task | None = None
         self.replay_speed = 1.0
+        self.replay_transition = False
+        self._runtime_stopped = False
         self.market_reference_cache: dict[tuple[str, date], dict[str, Any]] = {}
         self.replay_prepare_state: dict[str, Any] = {
             "state": "idle",
@@ -91,13 +93,57 @@ class WorkstationServer:
         )
 
     async def status(self, request: web.Request) -> web.Response:
+        if self.replay_transition:
+            status = dict(self.runtime.status)
+            status.update(
+                {
+                    "state": "preparing",
+                    "runtime_mode": "REPLAY",
+                    "mode": "REPLAY",
+                    "read_only": True,
+                    "replay_prepare": dict(self.replay_prepare_state),
+                }
+            )
+            return web.json_response(status)
         return web.json_response(self.runtime.status)
+
+    def _snapshot_payload(self, *, include_history: bool = False) -> dict[str, Any]:
+        if isinstance(self.runtime, ReplayRuntime):
+            return self.runtime.snapshot(include_history=include_history)
+        payload = self.runtime.snapshot()
+        if not self.replay_transition:
+            return payload
+        replay = {
+            "runtime_mode": "REPLAY",
+            "preparing": True,
+            "playing": False,
+            "speed": self.replay_speed,
+            "market_time_ns": 0,
+            "start_ns": 0,
+            "end_ns": 1,
+            "progress": 0,
+            "read_only": True,
+            **self.replay_prepare_state,
+        }
+        status = {
+            **payload.get("status", {}),
+            "state": "preparing",
+            "runtime_mode": "REPLAY",
+            "mode": "REPLAY",
+            "read_only": True,
+            "replay": replay,
+            "replay_prepare": dict(self.replay_prepare_state),
+        }
+        return {
+            **payload,
+            "status": status,
+            "replay": replay,
+            "writer": {"written": 0, "dropped": 0},
+        }
 
     async def snapshot(self, request: web.Request) -> web.Response:
         include_history = request.query.get("include_history") == "1"
-        if isinstance(self.runtime, ReplayRuntime):
-            return web.json_response(self.runtime.snapshot(include_history=include_history))
-        return web.json_response(self.runtime.snapshot())
+        return web.json_response(self._snapshot_payload(include_history=include_history))
 
     def _reference_day(self) -> date:
         eastern = ZoneInfo("America/New_York")
@@ -222,7 +268,7 @@ class WorkstationServer:
             raise web.HTTPBadRequest(text="symbol is required")
         if symbol not in self.runtime.symbols:
             raise web.HTTPBadRequest(text=f"symbol {symbol} is not in the active universe")
-        if isinstance(self.runtime, ReplayRuntime):
+        if isinstance(self.runtime, ReplayRuntime) or self.replay_transition:
             return web.json_response(
                 {
                     "session_id": self.runtime.session_id,
@@ -251,6 +297,15 @@ class WorkstationServer:
 
     async def replay_state(self, request: web.Request) -> web.Response:
         if not isinstance(self.runtime, ReplayRuntime):
+            if self.replay_transition:
+                return web.json_response(
+                    {
+                        "available": True,
+                        "runtime_mode": "REPLAY",
+                        "preparing": True,
+                        **self.replay_prepare_state,
+                    }
+                )
             return web.json_response({"runtime_mode": "LIVE", "available": False})
         return web.json_response({"available": True, **self.runtime.replay_state()})
 
@@ -304,21 +359,24 @@ class WorkstationServer:
         if any(not re.fullmatch(r"[A-Z][A-Z.\-]{0,9}", symbol) for symbol in symbols):
             raise web.HTTPBadRequest(text="One or more symbols use an invalid US equity format")
 
+        api_key = str(body.get("api_key") or self.args.alpaca_key or os.getenv("APCA_API_KEY_ID") or "") or None
+        api_secret = str(body.get("api_secret") or self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY") or "") or None
+
         # Alpaca's historical endpoint is only relevant when switching to
         # Alpaca.  IBKR/TWS must be able to switch with Alpaca credentials
         # unset; its readiness is determined by the TWS socket connection.
         if provider == "alpaca":
             try:
                 validation_day = await latest_completed_trading_day(
-                    api_key=self.args.alpaca_key,
-                    api_secret=self.args.alpaca_secret,
+                    api_key=api_key,
+                    api_secret=api_secret,
                 )
                 for symbol in symbols:
                     await validate_replay_request(
                         symbol=symbol,
                         trading_day=validation_day,
-                        api_key=self.args.alpaca_key,
-                        api_secret=self.args.alpaca_secret,
+                        api_key=api_key,
+                        api_secret=api_secret,
                     )
             except (ValueError, RuntimeError) as exc:
                 raise web.HTTPBadRequest(text=str(exc)) from exc
@@ -330,14 +388,16 @@ class WorkstationServer:
             except asyncio.CancelledError:
                 pass
         old_runtime = self.runtime
-        await old_runtime.stop()
+        if not self._runtime_stopped:
+            await old_runtime.stop()
+            self._runtime_stopped = True
         if provider == "alpaca":
             runtime = AlpacaOrderFlowRuntime(
                 symbols=symbols,
                 db_path=self.args.db,
                 feed=self.args.alpaca_feed,
-                api_key=self.args.alpaca_key,
-                api_secret=self.args.alpaca_secret,
+                api_key=api_key,
+                api_secret=api_secret,
             )
         else:
             runtime = OrderFlowRuntime(
@@ -353,7 +413,11 @@ class WorkstationServer:
             await runtime.start()
         except Exception as exc:
             raise web.HTTPBadRequest(text=f"Could not start LIVE {provider.upper()}: {exc}") from exc
+        if provider == "alpaca" and api_key and api_secret and not self._credentials_configured():
+            await self._save_credentials(api_key, api_secret)
         self.runtime = runtime
+        self.replay_transition = False
+        self._runtime_stopped = False
         self.replay_prepare_state = {"state": "idle", "symbol_cap": REPLAY_SYMBOL_CAP}
         await self._restart_broadcaster()
         await self._push_snapshot_to_clients()
@@ -363,6 +427,80 @@ class WorkstationServer:
         key = self.args.alpaca_key or os.getenv("APCA_API_KEY_ID")
         secret = self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY")
         return bool(key and secret)
+
+    @staticmethod
+    def _credential_env_path() -> Path:
+        """Find the same local .env location used by package startup."""
+        package_path = Path(__file__).resolve()
+        candidates = [Path.cwd() / ".env"]
+        candidates.extend(parent / ".env" for parent in package_path.parents)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return package_path.parents[1] / ".env"
+
+    async def _save_credentials(self, api_key: str, api_secret: str) -> None:
+        """Persist Alpaca credentials locally without exposing them to Git."""
+        path = self._credential_env_path()
+
+        def write() -> None:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
+            updates = {
+                "APCA_API_KEY_ID": api_key,
+                "APCA_API_SECRET_KEY": api_secret,
+            }
+            lines = text.splitlines(keepends=True)
+            seen: set[str] = set()
+            output: list[str] = []
+            for line in lines:
+                match = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", line)
+                name = match.group(1) if match else ""
+                if name in updates:
+                    output.append(f"{name}={updates[name]}\n")
+                    seen.add(name)
+                else:
+                    output.append(line)
+            if output and not output[-1].endswith(("\n", "\r")):
+                output[-1] += "\n"
+            for name, value in updates.items():
+                if name not in seen:
+                    output.append(f"{name}={value}\n")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text("".join(output), encoding="utf-8", newline="")
+            os.replace(temporary, path)
+
+        await asyncio.to_thread(write)
+        os.environ["APCA_API_KEY_ID"] = api_key
+        os.environ["APCA_API_SECRET_KEY"] = api_secret
+        self.args.alpaca_key = api_key
+        self.args.alpaca_secret = api_secret
+
+    async def credentials_reset(self, request: web.Request) -> web.Response:
+        """Remove locally persisted Alpaca credentials and clear this process."""
+        path = self._credential_env_path()
+
+        def remove() -> None:
+            if not path.is_file():
+                return
+            names = {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"}
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            kept = []
+            for line in lines:
+                match = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", line)
+                if match and match.group(1) in names:
+                    continue
+                kept.append(line)
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text("".join(kept), encoding="utf-8", newline="")
+            os.replace(temporary, path)
+
+        await asyncio.to_thread(remove)
+        for name in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"):
+            os.environ.pop(name, None)
+        self.args.alpaca_key = None
+        self.args.alpaca_secret = None
+        return web.json_response({"configured": False})
 
     async def replay_prepare_info(self, request: web.Request) -> web.Response:
         return web.json_response(
@@ -410,15 +548,27 @@ class WorkstationServer:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         except RuntimeError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
+        if not self._credentials_configured() and api_key and api_secret:
+            await self._save_credentials(api_key, api_secret)
+        # Stop LIVE as soon as Replay has passed validation.  The historical
+        # download can take time; keeping the adapter alive during that gap
+        # would continue market ingestion and leave the UI in LIVE mode.
+        if not self._runtime_stopped:
+            await self.runtime.stop()
+            self._runtime_stopped = True
+        self.replay_transition = True
         replay_db = Path(self.args.replay_db or "data/alpaca_replay.sqlite")
         self.replay_prepare_state = {
             "state": "preparing",
             "stage": "queued",
+            "runtime_mode": "REPLAY",
+            "preparing": True,
             "symbols": symbols,
             "symbol_cap": REPLAY_SYMBOL_CAP,
             "feed": "sip",
             "trading_day": trading_day.isoformat(),
         }
+        await self._push_snapshot_to_clients()
         self.replay_prepare_task = asyncio.create_task(
             self._prepare_previous_session(
                 symbols=symbols,
@@ -458,9 +608,12 @@ class WorkstationServer:
             await replay.seek(int(previous.get("market_time_ns") or replay.start_ns))
             if previous.get("playing"):
                 await replay.play()
+        old_runtime_was_stopped = self._runtime_stopped
         self.runtime = replay
+        self.replay_transition = False
+        self._runtime_stopped = False
         await self._restart_broadcaster()
-        if old_runtime is not replay:
+        if old_runtime is not replay and not old_runtime_was_stopped:
             await old_runtime.stop()
         self.replay_prepare_state.update(
             {
@@ -475,11 +628,7 @@ class WorkstationServer:
         await self._push_snapshot_to_clients()
 
     async def _push_snapshot_to_clients(self) -> None:
-        data = (
-            self.runtime.snapshot(include_history=True)
-            if isinstance(self.runtime, ReplayRuntime)
-            else self.runtime.snapshot()
-        )
+        data = self._snapshot_payload(include_history=True)
         payload = json.dumps(
             {"type": "snapshot", "data": data},
             separators=(",", ":"),
@@ -574,7 +723,7 @@ class WorkstationServer:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2 * 1024 * 1024)
         await ws.prepare(request)
         self.clients.add(ws)
-        await ws.send_json({"type": "snapshot", "data": self.runtime.snapshot()})
+        await ws.send_json({"type": "snapshot", "data": self._snapshot_payload()})
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -623,6 +772,7 @@ class WorkstationServer:
         app.router.add_post("/api/replay/control", self.replay_control)
         app.router.add_get("/api/replay/prepare", self.replay_prepare_info)
         app.router.add_post("/api/replay/prepare", self.replay_prepare)
+        app.router.add_post("/api/credentials/reset", self.credentials_reset)
         app.router.add_post("/api/live/switch", self.live_switch)
         app.router.add_get("/ws", self.ws)
         return app

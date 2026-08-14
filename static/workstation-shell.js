@@ -3,7 +3,7 @@ const $=s=>document.querySelector(s);
 const el=(tag,cls,html='')=>{const n=document.createElement(tag);n.className=cls;n.innerHTML=html;return n};
 const fmt=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0});
 const bps=n=>`${Number(n||0)>=0?'+':''}${Number(n||0).toFixed(2)} bps`;
-let snapshot=null,replay=null,prepareInfo=null,preparePoll=null,wasReplayMode=false;
+let snapshot=null,replay=null,prepareInfo=null,preparePoll=null,liveCredentialInfo=null,wasReplayMode=false;
 
 function selectedSymbol(){return window.OF?.S?.selected||snapshot?.status?.symbols?.[0]||''}
 function selectedMetrics(){const s=selectedSymbol();return snapshot?.metrics?.[s]||window.OF?.latest?.(s,'metrics')||null}
@@ -205,6 +205,40 @@ const liveModal=el('div','wsReplayModal');
 liveModal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsLiveClose">×</button><div class="wsReplayKicker">LIVE MARKET DATA</div><h2>切换到 LIVE</h2><p class="wsReplayLead">选择数据源并输入最多 5 只美股。确认前会验证 symbols；切换会停止当前 Replay。</p><label>Source</label><select id="wsLiveProvider" class="wsReplayInput"><option value="ibkr">TWS / IBKR</option><option value="alpaca">Alpaca WebSocket</option></select><label>Symbols</label><input id="wsLiveSymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA AAPL MSFT"><div class="wsReplayError" id="wsLiveError"></div><button class="wsReplayStart" id="wsLiveStart">VALIDATE & SWITCH LIVE</button></div>`;
 document.body.appendChild(liveModal);
 
+function enhanceCredentialBox(prefix){
+ const box=document.getElementById(`${prefix}Credentials`);if(!box)return;
+ box.classList.add('wsCredentialBox');
+ const fields=document.createElement('div');fields.id=`${prefix}CredentialFields`;
+ while(box.firstChild)fields.appendChild(box.firstChild);
+ const hint=fields.querySelector('.wsReplayHint');if(hint)hint.textContent='首次输入后保存到本机 .env；不会提交到 Git。';
+ box.appendChild(fields);
+ const saved=document.createElement('div');saved.id=`${prefix}CredentialSaved`;saved.className='wsCredentialSaved';saved.textContent='CREDENTIALS SAVED LOCALLY';box.appendChild(saved);
+ const reset=document.createElement('button');reset.type='button';reset.id=`${prefix}Reset`;reset.className='wsCredentialReset';reset.textContent='RESET CREDENTIALS';box.appendChild(reset);
+}
+enhanceCredentialBox('wsReplay');
+const liveCredentials=document.createElement('div');
+liveCredentials.id='wsLiveCredentials';liveCredentials.className='wsCredentialBox';
+liveCredentials.innerHTML='<div id="wsLiveCredentialFields"><label>Alpaca API Key</label><input id="wsLiveKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsLiveSecret" class="wsReplayInput" type="password" autocomplete="off"></div><div id="wsLiveCredentialSaved" class="wsCredentialSaved">CREDENTIALS SAVED LOCALLY</div><button type="button" id="wsLiveReset" class="wsCredentialReset">RESET CREDENTIALS</button>';
+document.getElementById('wsLiveError').before(liveCredentials);
+
+function setCredentialUI(prefix,configured){
+ const box=document.getElementById(`${prefix}Credentials`);if(!box)return;
+ const fields=document.getElementById(`${prefix}CredentialFields`),saved=document.getElementById(`${prefix}CredentialSaved`),reset=document.getElementById(`${prefix}Reset`);
+ box.style.display=prefix==='wsLive'&&document.getElementById('wsLiveProvider')?.value!=='alpaca'?'none':'block';
+ if(fields)fields.style.display=configured?'none':'block';
+ if(saved)saved.style.display=configured?'block':'none';
+ if(reset)reset.style.display='block';
+ if(configured){fields?.querySelectorAll('input').forEach(input=>{input.value=''});}
+}
+async function fetchCredentialInfo(){
+ const r=await fetch('/api/replay/prepare',{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json();
+}
+async function resetCredentials(){
+ const r=await fetch('/api/credentials/reset',{method:'POST'});if(!r.ok)throw new Error(await r.text());
+ prepareInfo={...(prepareInfo||{}),credentials_configured:false};liveCredentialInfo={...(liveCredentialInfo||{}),credentials_configured:false};
+ setCredentialUI('wsReplay',false);setCredentialUI('wsLive',false);
+}
+
 const prepPane=el('div','wsReplayPrepPane');
 prepPane.innerHTML=`<div class="wsPrepHead"><span>REPLAY SYMBOLS</span><b id="wsPrepSummary">0 / 0 ACTIVE</b></div><div id="wsPrepDay" class="wsPrepDay">等待选择股票</div><div id="wsPrepList" class="wsPrepList"></div><div id="wsPrepNote" class="wsPrepNote"></div>`;
 const universe=document.getElementById('universe');
@@ -283,7 +317,7 @@ function openReplayModal(){
  fetch('/api/replay/prepare',{cache:'no-store'}).then(r=>r.json()).then(info=>{
    prepareInfo=info;const cap=Number(info.symbol_cap||1);document.getElementById('wsReplayHint').textContent=`預設今天；可用左右箭頭或日曆切換日期。只允许 ${cap} 只股票，送出前会验证该日资料。`;
    const current=(info.current_symbols||snapshot?.status?.symbols||[]).slice(0,cap);if(!document.getElementById('wsReplaySymbols').value)document.getElementById('wsReplaySymbols').value=current.join(' ');
-   document.getElementById('wsReplayCredentials').style.display=info.credentials_configured?'none':'block';renderPrepUniverse(info);
+   setCredentialUI('wsReplay',!!info.credentials_configured);renderPrepUniverse(info);
  }).catch(()=>{});
 }
 document.getElementById('wsReplayBtn').onclick=()=>{if(isReplayMode()){openReplayModal();return}if(prepareInfo?.state==='preparing'){prepPane.classList.add('on');return}openReplayModal()};
@@ -311,6 +345,26 @@ document.getElementById('wsReplayStart').onclick=async()=>{
  }catch(e){err.textContent=String(e)}
 };
 document.getElementById('wsLiveStart').onclick=async()=>{const symbols=splitSymbols(document.getElementById('wsLiveSymbols').value),err=document.getElementById('wsLiveError');err.textContent='';if(!symbols.length||symbols.length>5){err.textContent='LIVE 请输入 1 到 5 只股票。';return}try{const r=await fetch('/api/live/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('wsLiveProvider').value,symbols})});if(!r.ok){err.textContent=await r.text();return}snapshot=await r.json();liveModal.classList.remove('on');bar.classList.remove('on');renderMetrics();renderReplay();renderPrepUniverse(null)}catch(e){err.textContent=String(e)}};
+
+async function syncLiveCredentialUI(){
+ const provider=document.getElementById('wsLiveProvider').value;
+ if(provider!=='alpaca'){setCredentialUI('wsLive',false);return}
+ try{liveCredentialInfo=await fetchCredentialInfo();setCredentialUI('wsLive',!!liveCredentialInfo.credentials_configured)}catch(e){document.getElementById('wsLiveError').textContent=String(e)}
+}
+document.getElementById('wsLiveProvider').onchange=syncLiveCredentialUI;
+document.getElementById('wsReplayReset').onclick=async()=>{try{await resetCredentials()}catch(e){document.getElementById('wsReplayError').textContent=String(e)}};
+document.getElementById('wsLiveReset').onclick=async()=>{try{await resetCredentials();await syncLiveCredentialUI()}catch(e){document.getElementById('wsLiveError').textContent=String(e)}};
+document.getElementById('wsLiveBtn').onclick=async()=>{document.getElementById('wsLiveError').textContent='';if(!document.getElementById('wsLiveSymbols').value)document.getElementById('wsLiveSymbols').value=(snapshot?.status?.symbols||[]).join(' ');liveModal.classList.add('on');await syncLiveCredentialUI()};
+document.getElementById('wsLiveStart').onclick=async()=>{
+ const provider=document.getElementById('wsLiveProvider').value,symbols=splitSymbols(document.getElementById('wsLiveSymbols').value),err=document.getElementById('wsLiveError');err.textContent='';
+ if(!symbols.length||symbols.length>5){err.textContent='LIVE requires 1 to 5 symbols.';return}
+ const payload={provider,symbols};
+ if(provider==='alpaca'&&!liveCredentialInfo?.credentials_configured){
+   payload.api_key=document.getElementById('wsLiveKey').value.trim();payload.api_secret=document.getElementById('wsLiveSecret').value.trim();
+   if(!payload.api_key||!payload.api_secret){err.textContent='首次使用 Alpaca Live 请输入 API Key 与 Secret。';return}
+ }
+ try{const r=await fetch('/api/live/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){err.textContent=await r.text();return}snapshot=await r.json();liveCredentialInfo={...(liveCredentialInfo||{}),credentials_configured:true};liveModal.classList.remove('on');bar.classList.remove('on');renderMetrics();renderReplay();renderPrepUniverse(null)}catch(e){err.textContent=String(e)}
+};
 
 async function refresh(){try{const r=await fetch('/api/snapshot',{cache:'no-store'});if(r.ok){snapshot=await r.json();renderMetrics();renderReplay();renderPrepUniverse(prepareInfo)}}catch(e){}}
 setInterval(refresh,750);setTimeout(refresh,50);setTimeout(ensureMetrics,100);
