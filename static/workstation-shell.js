@@ -36,7 +36,7 @@ function pressureBarsForMetrics(){
  }
  for(const metric of (window.OF?.S?.metrics?.[sym]||[])){
    const bar=get(bucket(metric.ts_ns));
-   [metric.bid_absorption,metric.offer_absorption,metric.seller_exhaustion,metric.buyer_exhaustion,metric.activity_score]
+   [metric.bid_absorption,metric.seller_exhaustion,metric.offer_absorption,metric.buyer_exhaustion,metric.activity_score]
      .forEach((value,index)=>{if(Number(value)>=70)bar.hits[index]++});
    buckets.set(bar.time,bar);
  }
@@ -57,11 +57,11 @@ function drawPressureMetricsOnly(){
  const g=pressureMetricsCanvas.getContext('2d');g.setTransform(ratio,0,0,ratio,0,0);g.clearRect(0,0,width,height);
  const bars=pressureBarsForMetrics();if(!bars.length)return;
  const maxHits=Math.max(1,...bars.flatMap(bar=>bar.hits)),maxVolume=Math.max(1,...bars.map(bar=>bar.volume));
- const colors=['#4bd39b','#ff7474','#9be6c9','#ffaaaa','#66c7e8','#e6bd61'],slot=width/bars.length,top=12,bottom=height-20;
+ const order=['bid','seller','offer','buyer','activity','volume'],visible=order.filter(key=>window.OF?.pressureSignalVisible?.()?.[key]!==false),colors={bid:'#4bd39b',seller:'#9be6c9',offer:'#ff7474',buyer:'#ffaaaa',activity:'#66c7e8',volume:'#e6bd61'},slot=width/bars.length,top=12,bottom=height-20;
  g.save();g.strokeStyle='rgba(150,150,150,.34)';g.lineWidth=1;for(let index=0;index<=bars.length;index++){const x=Math.round(index*slot)+.5;g.beginPath();g.moveTo(x,top-2);g.lineTo(x,bottom+1);g.stroke()}g.restore();
  bars.forEach((bar,index)=>{
-   const values=[...bar.hits,bar.volume/maxVolume*maxHits],gap=Math.max(1,slot*.025),barWidth=Math.max(1,(slot*.82-gap*5)/6);
-   values.forEach((value,column)=>{const barHeight=(bottom-top)*value/maxHits;g.fillStyle=colors[column];g.fillRect(index*slot+slot*.09+column*(barWidth+gap),bottom-barHeight,barWidth,barHeight)});
+   const values={bid:bar.hits[0],seller:bar.hits[1],offer:bar.hits[2],buyer:bar.hits[3],activity:bar.hits[4],volume:bar.volume/maxVolume*maxHits},gap=Math.max(1,slot*.025),barWidth=Math.max(1,(slot*.82-gap*(visible.length-1))/Math.max(1,visible.length));
+   visible.forEach((key,column)=>{const barHeight=(bottom-top)*values[key]/maxHits;g.fillStyle=colors[key];g.fillRect(index*slot+slot*.09+column*(barWidth+gap),bottom-barHeight,barWidth,barHeight)});
    if(index%Math.max(1,Math.ceil(bars.length/8))===0){g.fillStyle='#777';g.font='8px ui-monospace';g.textAlign='center';g.fillText(new Date(bar.time*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}),index*slot+slot*.5,height-5)}
  });
 }
@@ -81,6 +81,12 @@ function ensurePressureViewToggle(){
  document.body.classList.toggle('pressure-metrics-only',pressureMetricsOnly);
  requestAnimationFrame(drawPressureMetricsOnly);
 }
+ if(!window.__pressureMetricsOnlySignalBound){
+   document.addEventListener('change',event=>{
+     if(event.target.matches('#view-pressure input[data-signal]')&&pressureMetricsOnly)requestAnimationFrame(drawPressureMetricsOnly);
+   });
+   window.__pressureMetricsOnlySignalBound=true;
+ }
 setInterval(ensurePressureViewToggle,500);
 
 const footprintBoundSurfaces=new WeakSet();
