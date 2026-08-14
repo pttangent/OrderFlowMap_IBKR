@@ -4,13 +4,21 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from .alpaca_replay import REPLAY_SYMBOL_CAP, build_previous_session_replay, clean_replay_symbols
+from .alpaca_replay import (
+    REPLAY_SYMBOL_CAP,
+    build_previous_session_replay,
+    clean_replay_symbols,
+    latest_completed_trading_day,
+    validate_replay_request,
+)
 from .alpaca_runtime import AlpacaOrderFlowRuntime
 from .history import load_history
 from .replay_runtime import ReplayRuntime
@@ -165,6 +173,76 @@ class WorkstationServer:
             raise web.HTTPBadRequest(text="unknown replay action")
         return web.json_response(self.runtime.replay_state())
 
+    async def live_switch(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        provider = str(body.get("provider") or "").lower()
+        raw_symbols = body.get("symbols") or []
+        if isinstance(raw_symbols, str):
+            raw_symbols = raw_symbols.replace(",", " ").split()
+        symbols = list(dict.fromkeys(str(value).strip().upper() for value in raw_symbols if str(value).strip()))
+        if provider not in {"ibkr", "alpaca"}:
+            raise web.HTTPBadRequest(text="LIVE source must be IBKR TWS or Alpaca WebSocket")
+        if not symbols or len(symbols) > 5:
+            raise web.HTTPBadRequest(text="LIVE requires 1 to 5 symbols")
+        if any(not re.fullmatch(r"[A-Z][A-Z.\-]{0,9}", symbol) for symbol in symbols):
+            raise web.HTTPBadRequest(text="One or more symbols use an invalid US equity format")
+
+        # Alpaca's historical endpoint gives a deterministic, provider-neutral
+        # preflight for the US equity symbols before disrupting the current mode.
+        try:
+            validation_day = await latest_completed_trading_day(
+                api_key=self.args.alpaca_key,
+                api_secret=self.args.alpaca_secret,
+            )
+            for symbol in symbols:
+                await validate_replay_request(
+                    symbol=symbol,
+                    trading_day=validation_day,
+                    api_key=self.args.alpaca_key,
+                    api_secret=self.args.alpaca_secret,
+                )
+        except (ValueError, RuntimeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+        if self.replay_prepare_task and not self.replay_prepare_task.done():
+            self.replay_prepare_task.cancel()
+            try:
+                await self.replay_prepare_task
+            except asyncio.CancelledError:
+                pass
+        old_runtime = self.runtime
+        await old_runtime.stop()
+        if provider == "alpaca":
+            runtime = AlpacaOrderFlowRuntime(
+                symbols=symbols,
+                db_path=self.args.db,
+                feed=self.args.alpaca_feed,
+                api_key=self.args.alpaca_key,
+                api_secret=self.args.alpaca_secret,
+            )
+        else:
+            runtime = OrderFlowRuntime(
+                symbols=symbols,
+                mode=self.args.mode,
+                db_path=self.args.db,
+                ib_host=self.args.ib_host,
+                ib_port=self.args.ib_port,
+                client_id=self.args.client_id,
+                market_data_lines=self.args.market_data_lines,
+            )
+        try:
+            await runtime.start()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text=f"Could not start LIVE {provider.upper()}: {exc}") from exc
+        self.runtime = runtime
+        self.replay_prepare_state = {"state": "idle", "symbol_cap": REPLAY_SYMBOL_CAP}
+        await self._restart_broadcaster()
+        await self._push_snapshot_to_clients()
+        return web.json_response(runtime.snapshot())
+
     def _credentials_configured(self) -> bool:
         key = self.args.alpaca_key or os.getenv("APCA_API_KEY_ID")
         secret = self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY")
@@ -201,6 +279,21 @@ class WorkstationServer:
 
         api_key = str(body.get("api_key") or self.args.alpaca_key or "") or None
         api_secret = str(body.get("api_secret") or self.args.alpaca_secret or "") or None
+        try:
+            trading_day = date.fromisoformat(str(body.get("date") or ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="Replay date must use YYYY-MM-DD") from exc
+        try:
+            await validate_replay_request(
+                symbol=symbols[0],
+                trading_day=trading_day,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        except RuntimeError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
         replay_db = Path(self.args.replay_db or "data/alpaca_replay.sqlite")
         self.replay_prepare_state = {
             "state": "preparing",
@@ -208,6 +301,7 @@ class WorkstationServer:
             "symbols": symbols,
             "symbol_cap": REPLAY_SYMBOL_CAP,
             "feed": "sip",
+            "trading_day": trading_day.isoformat(),
         }
         self.replay_prepare_task = asyncio.create_task(
             self._prepare_previous_session(
@@ -215,6 +309,7 @@ class WorkstationServer:
                 api_key=api_key,
                 api_secret=api_secret,
                 replay_db=replay_db,
+                trading_day=trading_day,
             )
         )
         return web.json_response(self.replay_prepare_state, status=202)
@@ -290,6 +385,7 @@ class WorkstationServer:
         api_key: str | None,
         api_secret: str | None,
         replay_db: Path,
+        trading_day: date,
     ) -> None:
         new_runtime: ReplayRuntime | None = None
 
@@ -305,6 +401,7 @@ class WorkstationServer:
                 api_key=api_key,
                 api_secret=api_secret,
                 speed=1.0,
+                trading_day=trading_day,
                 on_progress=progress,
                 on_symbol_ready=self._activate_replay_symbols,
             )
@@ -409,6 +506,7 @@ class WorkstationServer:
         app.router.add_post("/api/replay/control", self.replay_control)
         app.router.add_get("/api/replay/prepare", self.replay_prepare_info)
         app.router.add_post("/api/replay/prepare", self.replay_prepare)
+        app.router.add_post("/api/live/switch", self.live_switch)
         app.router.add_get("/ws", self.ws)
         return app
 

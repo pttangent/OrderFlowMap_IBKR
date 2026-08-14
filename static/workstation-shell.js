@@ -11,7 +11,7 @@ function splitSymbols(text){return [...new Set(String(text||'').toUpperCase().sp
 function isReplayMode(){return (snapshot?.status?.runtime_mode||snapshot?.status?.mode)==='REPLAY'}
 
 const top=el('div','wsTopActions');
-top.innerHTML=`<span class="wsMode">MODE <b id="wsMode">...</b></span><a class="wsAction" href="/radar">RADAR</a><button class="wsAction" id="wsNoviceBtn">NOVICE</button><a class="wsAction" href="/learn" target="_blank">TEACHING</a><button class="wsAction replay" id="wsReplayBtn">SIM REPLAY</button>`;
+top.innerHTML=`<span class="wsMode">MODE <b id="wsMode">...</b></span><a class="wsAction" href="/radar">RADAR</a><button class="wsAction" id="wsNoviceBtn">NOVICE</button><a class="wsAction" href="/learn" target="_blank">TEACHING</a><button class="wsAction" id="wsLiveBtn">LIVE</button><button class="wsAction replay" id="wsReplayBtn">SIM REPLAY</button>`;
 document.body.appendChild(top);
 
 const bar=el('div','wsReplayBar');
@@ -23,8 +23,12 @@ novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT
 document.body.appendChild(novice);
 
 const modal=el('div','wsReplayModal');
-modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>准备最近完整交易日</h2><p class="wsReplayLead">输入最多 5 只美股。按下后窗口会立即关闭，数据在背景逐只下载；左侧 Symbol 列表会显示 ACTIVE / INACTIVE 状态。</p><label>Symbols</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="XE SNDK NVDA"><div class="wsReplayHint" id="wsReplayHint">最多 5 只；逐只下载，完成即 ACTIVE。</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">PREPARE REPLAY</button></div>`;
+modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>准备单一交易日</h2><p class="wsReplayLead">输入一只美股与交易日。确认前会验证 symbol，以及该日的 Alpaca SIP trades / quotes 是否可取得。</p><label>Symbol</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA"><label>Replay date</label><input id="wsReplayDate" class="wsReplayInput" type="date"><div class="wsReplayHint" id="wsReplayHint">只允许 1 只股票；验证失败请重新输入。</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">VALIDATE & PREPARE</button></div>`;
 document.body.appendChild(modal);
+
+const liveModal=el('div','wsReplayModal');
+liveModal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsLiveClose">×</button><div class="wsReplayKicker">LIVE MARKET DATA</div><h2>切换到 LIVE</h2><p class="wsReplayLead">选择数据源并输入最多 5 只美股。确认前会验证 symbols；切换会停止当前 Replay。</p><label>Source</label><select id="wsLiveProvider" class="wsReplayInput"><option value="ibkr">TWS / IBKR</option><option value="alpaca">Alpaca WebSocket</option></select><label>Symbols</label><input id="wsLiveSymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="NVDA AAPL MSFT"><div class="wsReplayError" id="wsLiveError"></div><button class="wsReplayStart" id="wsLiveStart">VALIDATE & SWITCH LIVE</button></div>`;
+document.body.appendChild(liveModal);
 
 const prepPane=el('div','wsReplayPrepPane');
 prepPane.innerHTML=`<div class="wsPrepHead"><span>REPLAY SYMBOLS</span><b id="wsPrepSummary">0 / 0 ACTIVE</b></div><div id="wsPrepDay" class="wsPrepDay">等待选择股票</div><div id="wsPrepList" class="wsPrepList"></div><div id="wsPrepNote" class="wsPrepNote"></div>`;
@@ -105,8 +109,10 @@ function openReplayModal(){
    document.getElementById('wsReplayCredentials').style.display=info.credentials_configured?'none':'block';renderPrepUniverse(info);
  }).catch(()=>{});
 }
-document.getElementById('wsReplayBtn').onclick=()=>{if(isReplayMode()){bar.classList.toggle('on');return}if(prepareInfo?.state==='preparing'){prepPane.classList.add('on');return}openReplayModal()};
+document.getElementById('wsReplayBtn').onclick=()=>{if(isReplayMode()){openReplayModal();return}if(prepareInfo?.state==='preparing'){prepPane.classList.add('on');return}openReplayModal()};
 document.getElementById('wsReplayClose').onclick=()=>modal.classList.remove('on');
+document.getElementById('wsLiveBtn').onclick=()=>{document.getElementById('wsLiveError').textContent='';if(!document.getElementById('wsLiveSymbols').value)document.getElementById('wsLiveSymbols').value=(snapshot?.status?.symbols||[]).join(' ');liveModal.classList.add('on')};
+document.getElementById('wsLiveClose').onclick=()=>liveModal.classList.remove('on');
 
 function stopPreparePoll(){if(preparePoll){clearInterval(preparePoll);preparePoll=null}}
 async function pollPrepare(){
@@ -118,15 +124,16 @@ async function pollPrepare(){
 }
 function beginPreparePoll(){stopPreparePoll();preparePoll=setInterval(pollPrepare,700);pollPrepare()}
 document.getElementById('wsReplayStart').onclick=async()=>{
- const symbols=splitSymbols(document.getElementById('wsReplaySymbols').value);const cap=Number(prepareInfo?.symbol_cap||5);const err=document.getElementById('wsReplayError');err.textContent='';
+ const symbols=splitSymbols(document.getElementById('wsReplaySymbols').value);const cap=Number(prepareInfo?.symbol_cap||1),day=document.getElementById('wsReplayDate').value;const err=document.getElementById('wsReplayError');err.textContent='';
  if(!symbols.length){err.textContent='请输入至少一只股票。';return}if(symbols.length>cap){err.textContent=`最多选择 ${cap} 只股票。`;return}
- const payload={symbols};if(!prepareInfo?.credentials_configured){payload.api_key=document.getElementById('wsReplayKey').value.trim();payload.api_secret=document.getElementById('wsReplaySecret').value.trim()}
+ if(!day){err.textContent='请选择 Replay date。';return}const payload={symbols,date:day};if(!prepareInfo?.credentials_configured){payload.api_key=document.getElementById('wsReplayKey').value.trim();payload.api_secret=document.getElementById('wsReplaySecret').value.trim()}
  try{
    const r=await fetch('/api/replay/prepare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
    if(!r.ok){err.textContent=await r.text();return}
    prepareInfo=await r.json();modal.classList.remove('on');renderPrepUniverse(prepareInfo);beginPreparePoll();
  }catch(e){err.textContent=String(e)}
 };
+document.getElementById('wsLiveStart').onclick=async()=>{const symbols=splitSymbols(document.getElementById('wsLiveSymbols').value),err=document.getElementById('wsLiveError');err.textContent='';if(!symbols.length||symbols.length>5){err.textContent='LIVE 请输入 1 到 5 只股票。';return}try{const r=await fetch('/api/live/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('wsLiveProvider').value,symbols})});if(!r.ok){err.textContent=await r.text();return}snapshot=await r.json();liveModal.classList.remove('on');bar.classList.remove('on');renderMetrics();renderReplay();renderPrepUniverse(null)}catch(e){err.textContent=String(e)}};
 
 async function refresh(){try{const r=await fetch('/api/snapshot',{cache:'no-store'});if(r.ok){snapshot=await r.json();renderMetrics();renderReplay();renderPrepUniverse(prepareInfo)}}catch(e){}}
 setInterval(refresh,750);setTimeout(refresh,50);setTimeout(ensureMetrics,100);

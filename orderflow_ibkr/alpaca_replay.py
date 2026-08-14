@@ -18,7 +18,7 @@ from .replay_runtime import ReplayRuntime
 # Replay is intentionally kept small even though Historical REST itself does
 # not publish a five-symbol ceiling. Five symbols keeps full-day tick replay
 # practical and aligns with the workstation's deep-focus use case.
-REPLAY_SYMBOL_CAP = 5
+REPLAY_SYMBOL_CAP = 1
 FREE_HISTORICAL_RPM = 200
 REPLAY_DOWNLOAD_RPM = 180
 LATEST_DATA_DELAY_MIN = 16
@@ -390,6 +390,40 @@ async def latest_completed_trading_day(
     )
 
 
+async def validate_replay_request(
+    *,
+    symbol: str,
+    trading_day: date,
+    api_key: str | None = None,
+    api_secret: str | None = None,
+) -> None:
+    """Confirm the requested US equity and day have both SIP trades and quotes."""
+    key, secret = _credentials(api_key, api_secret)
+    if trading_day.weekday() >= 5:
+        raise ValueError("Replay date must be a US trading weekday")
+    start_dt, end_dt = _bounds(trading_day, "regular")
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    params = {"start": _iso_z(start_dt), "end": _iso_z(end_dt), "feed": "sip", "limit": 1, "sort": "asc"}
+    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+    async with aiohttp.ClientSession(timeout=timeout) as client:
+        for kind in ("trades", "quotes"):
+            async with client.get(
+                f"https://data.alpaca.markets/v2/stocks/{symbol}/{kind}",
+                params=params,
+                headers=headers,
+            ) as response:
+                body = await response.text()
+                if response.status in (400, 404):
+                    raise ValueError(f"Unknown or unsupported US equity symbol: {symbol}")
+                if response.status in (401, 403):
+                    raise RuntimeError("Alpaca historical authorization failed; check SIP access")
+                if response.status >= 400:
+                    raise RuntimeError(f"Alpaca {kind} validation failed HTTP {response.status}: {body[:200]}")
+                payload = json.loads(body)
+                if not payload.get(kind):
+                    raise ValueError(f"No Alpaca SIP {kind} available for {symbol} on {trading_day.isoformat()}")
+
+
 async def build_previous_session_replay(
     *,
     symbols: list[str],
@@ -397,6 +431,7 @@ async def build_previous_session_replay(
     api_key: str | None = None,
     api_secret: str | None = None,
     speed: float = 1.0,
+    trading_day: date | None = None,
     on_progress: ProgressCallback | None = None,
     on_symbol_ready: SymbolReadyCallback | None = None,
 ) -> PreparedReplay:
@@ -405,7 +440,7 @@ async def build_previous_session_replay(
     notify = on_progress or (lambda _payload: None)
 
     notify({"stage": "resolving_day", "symbols": symbols})
-    trading_day = await latest_completed_trading_day(api_key=key, api_secret=secret)
+    trading_day = trading_day or await latest_completed_trading_day(api_key=key, api_secret=secret)
     path = Path(db_path)
     cache_session = _cache_session_id(trading_day)
     total_requests = 0

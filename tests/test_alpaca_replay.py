@@ -22,14 +22,13 @@ from orderflow_ibkr.alpaca_replay import (
 
 
 def test_clean_replay_symbols_normalizes_and_deduplicates():
-    assert REPLAY_SYMBOL_CAP == 5
-    assert clean_replay_symbols(["xe, sndk", "XE", " nvda "]) == ["XE", "SNDK", "NVDA"]
-    assert clean_replay_symbols(["A", "B", "C", "D", "E"]) == ["A", "B", "C", "D", "E"]
+    assert REPLAY_SYMBOL_CAP == 1
+    assert clean_replay_symbols([" xe ", "XE"]) == ["XE"]
 
 
-def test_clean_replay_symbols_enforces_five_symbol_cap():
+def test_clean_replay_symbols_enforces_single_symbol_cap():
     with pytest.raises(ValueError):
-        clean_replay_symbols(["A", "B", "C", "D", "E", "F"])
+        clean_replay_symbols(["A", "B"])
 
 
 def test_candidate_uses_today_only_after_free_sip_delay():
