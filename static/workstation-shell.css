@@ -20,7 +20,7 @@
 /* Pressure is a compact dashboard: keep the whole middle view inside the viewport. */
 .center:has(#view-pressure.on){overflow:hidden!important;min-height:0}
 #view-pressure.on{min-height:0!important;overflow:hidden!important;grid-template-rows:46px minmax(0,1fr)!important}
-#view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,1fr) minmax(150px,38%)!important}
+#view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,1fr) minmax(0,2fr)!important}
 #view-pressure.on #pressureBars,
 #view-pressure.on #pressureEvidence{min-height:0!important;overflow:auto!important}
 #view-pressure.on #pressureHistogram{display:flex!important;flex-direction:column!important;min-height:0!important;height:auto!important;overflow:hidden!important;margin:0!important}
