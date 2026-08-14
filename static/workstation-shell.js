@@ -82,6 +82,36 @@ function ensurePressureViewToggle(){
 }
 setInterval(ensurePressureViewToggle,500);
 
+const footprintBoundSurfaces=new WeakSet();
+function bindFootprintInteractions(){
+ document.querySelectorAll('#view-footprint .fpScroller,#view-footprint .fpTsScroll').forEach(surface=>{
+   if(footprintBoundSurfaces.has(surface))return;
+   footprintBoundSurfaces.add(surface);surface.classList.add('fpPanSurface');
+   let drag=null,wheelDelta=0;
+   surface.addEventListener('wheel',event=>{
+     if(event.target.closest('button,select,input'))return;
+     event.preventDefault();const delta=event.deltaY||event.deltaX;
+     if(event.shiftKey){surface.scrollLeft+=delta;return}
+     if(surface.matches('.fpScroller')){
+       wheelDelta+=delta;if(Math.abs(wheelDelta)<55)return;
+       const button=document.querySelector(`#view-footprint .fpCanvasZoom button:${wheelDelta>0?'first':'last'}-child`);
+       button?.click();wheelDelta=0;
+     }else{
+       const scale=Math.max(.65,Math.min(1.55,Number(surface.dataset.fpScale||1)-(delta>0?.08:-.08)));
+       surface.dataset.fpScale=scale.toFixed(2);surface.style.setProperty('--fp-ts-scale',scale.toFixed(2));
+     }
+   },{passive:false});
+   surface.addEventListener('pointerdown',event=>{
+     if(event.button!==0||event.target.closest('button,select,input'))return;
+     drag={id:event.pointerId,x:event.clientX,left:surface.scrollLeft};surface.setPointerCapture?.(event.pointerId);surface.classList.add('is-dragging');
+   });
+   surface.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;surface.scrollLeft=drag.left-(event.clientX-drag.x)});
+   const stop=event=>{if(!drag||drag.id!==event.pointerId)return;drag=null;surface.classList.remove('is-dragging');surface.releasePointerCapture?.(event.pointerId)};
+   surface.addEventListener('pointerup',stop);surface.addEventListener('pointercancel',stop);
+ });
+}
+setInterval(bindFootprintInteractions,500);
+
 const novice=el('aside','wsNovice');
 novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT 回答什么？</h4><ul><li><strong>哪几个价位发生最大交换？</strong> 看每根 Bar 的 POC 与 Volume。</li><li><strong>哪边主动成交占优？</strong> 看 Sell@Bid / Buy@Ask / Δ。</li><li><strong>单边成交是否真的推动价格？</strong> 把 Δ 和左边 Candle 的实际价格结果一起看。</li></ul><h4>最重要的判断顺序</h4><p>① 先看 Candle 有没有价格进展。<br>② 再看同一根 Footprint 谁在主动成交。<br>③ 如果成交方向和价格结果背离，切到 Pressure 检查 Absorption。<br>④ CVD 用于确认/背离，不单独作为方向信号。</p><h4>结构标记</h4><p><strong>青框：</strong>单根 Bar POC。<br><strong>橙框：</strong>Diagonal Imbalance。<br><strong>BID ABS：</strong>负 Δ 但 Candle 上涨。<br><strong>OFFER ABS：</strong>正 Δ 但 Candle 下跌。</p><h4>Replay</h4><p>SIM REPLAY 会在背景逐只下载 Alpaca Historical SIP。左侧 ACTIVE 表示该股票整日录像已准备好；INACTIVE 表示仍在下载或排队。准备期间不会锁住主界面。</p>`;
 document.body.appendChild(novice);
