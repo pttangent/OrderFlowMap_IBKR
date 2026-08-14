@@ -17,3 +17,14 @@
 #fpInsight .fpTsNote{display:none!important}.studyAside{display:none!important}.studyGrid{grid-template-columns:1fr!important}.studyMain{border-right:0!important}.viewHead span:not(.qualityNote){display:none!important}
 .formationView.wsFormationTitle{grid-template-rows:46px minmax(330px,1fr) 125px 126px!important}.viewPanel .viewHead .wsReplayBar{position:static;z-index:auto;transform:none;flex:1;flex-wrap:nowrap;min-width:320px;height:32px;margin-left:14px;padding:1px 4px;border:0;background:transparent;overflow:visible}.viewPanel .viewHead .wsReplayBar.on{display:flex}.viewPanel .viewHead .wsReplayBar .wsTimeline{order:initial;flex-basis:auto;height:30px;min-width:140px;padding:11px 0 5px}.viewPanel .viewHead .wsReplayBar .wsTimelineTop,.viewPanel .viewHead .wsReplayBar .wsTimelineBottom{font-size:7px}.viewPanel .viewHead .wsReplayBar button,.viewPanel .viewHead .wsReplayBar select{padding:4px 5px;font-size:8px}
 @media(max-width:900px){.wsTopActions{position:sticky;top:0;right:auto;width:100%;justify-content:flex-end;border-left:0;border-right:0}.wsReplayBar{top:54px;left:6px;right:6px;transform:none;min-width:0;width:auto;height:76px;flex-wrap:wrap}.wsTimeline{order:2;flex-basis:100%;height:42px}.wsNovice{top:136px;left:8px;right:8px;width:auto}.wsMetrics{height:auto;grid-template-columns:repeat(2,1fr)}.fpBar{flex-basis:315px!important}.wsReplayDialog{padding:20px}.wsReplayPrepPane{inset:29px 0 0}.wsPrepRow{grid-template-columns:14px minmax(46px,1fr) 30px auto;padding:8px 6px}}
+/* Pressure is a compact dashboard: keep the whole middle view inside the viewport. */
+.center:has(#view-pressure.on){overflow:hidden!important;min-height:0}
+#view-pressure.on{min-height:0!important;overflow:hidden!important;grid-template-rows:46px minmax(0,1fr)!important}
+#view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,1fr) minmax(150px,38%)!important}
+#view-pressure.on #pressureBars,
+#view-pressure.on #pressureEvidence{min-height:0!important;overflow:auto!important}
+#view-pressure.on #pressureHistogram{display:flex!important;flex-direction:column!important;min-height:0!important;height:auto!important;overflow:hidden!important;margin:0!important}
+#view-pressure.on #pressureHistogram .pressureHistogramHead{flex:0 0 auto}
+#view-pressure.on #pressureHistogram .pressureHistogramScroll{flex:1 1 auto!important;min-height:0!important;height:auto!important;overflow:hidden!important;padding-bottom:0!important}
+#view-pressure.on #pressureHistogram #pressureHistogramCanvas{display:block;width:100%!important;height:100%!important;max-width:none!important}
+#view-pressure.on #pressureHistogram .pressureSignalControls{flex:0 0 34px;height:34px!important;min-height:34px!important;margin-top:0!important;padding:5px 0 0!important}
