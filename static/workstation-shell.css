@@ -22,6 +22,13 @@
 #view-pressure.on{min-height:0!important;overflow:hidden!important;grid-template-rows:46px minmax(0,1fr)!important}
 #view-pressure.on .pressureLayout{height:100%!important;min-height:0!important;overflow:hidden!important;grid-template-rows:minmax(0,2fr) minmax(0,3fr)!important}
 #view-pressure.on .pressureScore{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+#view-pressure.on #pressureBars{padding:10px 14px!important}
+#view-pressure.on #pressureBars .pressureRow{margin:8px 0!important}
+#view-pressure.on #pressureBars .pressureRow>div{height:13px!important}
+#view-pressure.on #pressureBars .responseRow{padding:8px 0!important}
+#view-pressure.on #pressureBars .pressureScore{margin-top:5px!important}
+#view-pressure.on #pressureBars .pressureScore div{padding:6px 7px!important}
+#view-pressure.on #pressureBars .pressureScore b{font-size:14px!important;margin-top:3px!important}
 #view-pressure.on #pressureBars,
 #view-pressure.on #pressureEvidence{min-height:0!important;overflow:auto!important}
 #view-pressure.on #pressureHistogram{display:flex!important;flex-direction:column!important;min-height:0!important;height:auto!important;overflow:hidden!important;margin:0!important}
