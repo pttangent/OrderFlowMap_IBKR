@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
@@ -13,14 +15,14 @@ import aiohttp
 from .alpaca_history import DownloadStats, _bounds, _iso_z, record_day
 from .replay_runtime import ReplayRuntime
 
-# Alpaca Basic currently allows 30 live equity WebSocket symbols and 200
-# historical requests/minute. Historical REST does not publish a 30-symbol
-# ceiling, but keeping the interactive replay picker inside the free real-time
-# envelope gives the workstation one simple, conservative product limit.
-REPLAY_SYMBOL_CAP = 30
+# Replay is intentionally kept small even though Historical REST itself does
+# not publish a five-symbol ceiling. Five symbols keeps full-day tick replay
+# practical and aligns with the workstation's deep-focus use case.
+REPLAY_SYMBOL_CAP = 5
 FREE_HISTORICAL_RPM = 200
 REPLAY_DOWNLOAD_RPM = 180
 LATEST_DATA_DELAY_MIN = 16
+CACHE_META_PREFIX = "replay_symbol_complete:"
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -44,8 +46,7 @@ def clean_replay_symbols(values: list[str]) -> list[str]:
         raise ValueError("At least one replay symbol is required")
     if len(out) > REPLAY_SYMBOL_CAP:
         raise ValueError(
-            f"Replay supports at most {REPLAY_SYMBOL_CAP} symbols in the free-tier UI; "
-            f"received {len(out)}."
+            f"Replay supports at most {REPLAY_SYMBOL_CAP} symbols; received {len(out)}."
         )
     return out
 
@@ -72,6 +73,254 @@ def _credentials(api_key: str | None, api_secret: str | None) -> tuple[str, str]
             "APCA_API_SECRET_KEY or enter them in the local Replay dialog."
         )
     return key, secret
+
+
+def _cache_session_id(trading_day: date) -> str:
+    return f"alpaca-sip-{trading_day.isoformat()}-regular-cache"
+
+
+def _cache_marker_key(session_id: str, symbol: str) -> str:
+    return f"{CACHE_META_PREFIX}{session_id}:{symbol.upper()}"
+
+
+def _open_existing(path: Path) -> sqlite3.Connection | None:
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(path, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def _cached_symbol_counts(
+    path: Path,
+    *,
+    session_id: str,
+    symbol: str,
+) -> tuple[int, int] | None:
+    conn = _open_existing(path)
+    if conn is None:
+        return None
+    try:
+        marker = conn.execute(
+            "SELECT value FROM schema_meta WHERE key=?",
+            (_cache_marker_key(session_id, symbol),),
+        ).fetchone()
+        if marker is None:
+            return None
+        try:
+            meta = json.loads(str(marker["value"]))
+        except Exception:
+            return None
+        if not bool(meta.get("complete")):
+            return None
+        q = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM raw_quotes WHERE session_id=? AND symbol=?",
+                (session_id, symbol),
+            ).fetchone()[0]
+        )
+        t = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM raw_trades WHERE session_id=? AND symbol=?",
+                (session_id, symbol),
+            ).fetchone()[0]
+        )
+        if q <= 0 or t <= 0:
+            return None
+        return q, t
+    finally:
+        conn.close()
+
+
+def _ensure_cache_session(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    trading_day: date,
+    symbol: str,
+) -> None:
+    start_dt, end_dt = _bounds(trading_day, "regular")
+    start_ns = int(start_dt.timestamp() * 1_000_000_000)
+    end_ns = int(end_dt.timestamp() * 1_000_000_000)
+    row = conn.execute(
+        "SELECT symbols_json FROM sessions WHERE session_id=?",
+        (session_id,),
+    ).fetchone()
+    existing: list[str] = []
+    if row is not None:
+        try:
+            existing = [str(x).upper() for x in json.loads(str(row[0]))]
+        except Exception:
+            existing = []
+    merged = list(dict.fromkeys([*existing, symbol.upper()]))
+    notes = json.dumps(
+        {
+            "provider": "alpaca",
+            "historical": True,
+            "feed": "sip",
+            "session": "regular",
+            "trading_day": trading_day.isoformat(),
+            "replay_cache": True,
+            "download_strategy": "sequential_per_symbol",
+            "quote_size_unit": "shares",
+        },
+        separators=(",", ":"),
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions(
+          session_id,started_ns,ended_ns,mode,symbols_json,ib_host,ib_port,
+          client_id,market_data_lines,notes
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          started_ns=excluded.started_ns,
+          ended_ns=excluded.ended_ns,
+          mode=excluded.mode,
+          symbols_json=excluded.symbols_json,
+          ib_host=excluded.ib_host,
+          ib_port=excluded.ib_port,
+          client_id=excluded.client_id,
+          market_data_lines=excluded.market_data_lines,
+          notes=excluded.notes
+        """,
+        (
+            session_id,
+            start_ns,
+            end_ns,
+            "ALPACA_HISTORICAL_SIP_CACHE",
+            json.dumps(merged),
+            "data.alpaca.markets",
+            443,
+            0,
+            len(merged),
+            notes,
+        ),
+    )
+
+
+def _merge_temp_symbol_into_cache(
+    path: Path,
+    *,
+    temp_session_id: str,
+    cache_session_id: str,
+    trading_day: date,
+    symbol: str,
+) -> tuple[int, int]:
+    symbol = symbol.upper()
+    conn = sqlite3.connect(path, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        with conn:
+            _ensure_cache_session(
+                conn,
+                session_id=cache_session_id,
+                trading_day=trading_day,
+                symbol=symbol,
+            )
+            conn.execute(
+                "DELETE FROM raw_quotes WHERE session_id=? AND symbol=?",
+                (cache_session_id, symbol),
+            )
+            conn.execute(
+                "DELETE FROM raw_trades WHERE session_id=? AND symbol=?",
+                (cache_session_id, symbol),
+            )
+            conn.execute(
+                "DELETE FROM subscriptions WHERE session_id=? AND symbol=?",
+                (cache_session_id, symbol),
+            )
+            conn.execute(
+                """
+                INSERT INTO raw_quotes(
+                  session_id,symbol,ts_ns,bid,ask,bid_size,ask_size,last,last_size,
+                  volume,vwap,trade_count,trade_rate,volume_rate,source,quality
+                )
+                SELECT ?,symbol,ts_ns,bid,ask,bid_size,ask_size,last,last_size,
+                       volume,vwap,trade_count,trade_rate,volume_rate,source,quality
+                FROM raw_quotes
+                WHERE session_id=? AND symbol=?
+                ORDER BY id
+                """,
+                (cache_session_id, temp_session_id, symbol),
+            )
+            conn.execute(
+                """
+                INSERT INTO raw_trades(
+                  session_id,symbol,ts_ns,price,size,exchange,conditions_json,
+                  aggressor,aggressor_confidence,source,quality
+                )
+                SELECT ?,symbol,ts_ns,price,size,exchange,conditions_json,
+                       aggressor,aggressor_confidence,source,quality
+                FROM raw_trades
+                WHERE session_id=? AND symbol=?
+                ORDER BY id
+                """,
+                (cache_session_id, temp_session_id, symbol),
+            )
+            q = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM raw_quotes WHERE session_id=? AND symbol=?",
+                    (cache_session_id, symbol),
+                ).fetchone()[0]
+            )
+            t = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM raw_trades WHERE session_id=? AND symbol=?",
+                    (cache_session_id, symbol),
+                ).fetchone()[0]
+            )
+            if q <= 0 or t <= 0:
+                raise RuntimeError(
+                    f"Cannot cache incomplete Alpaca replay data for {symbol}: quotes={q}, trades={t}"
+                )
+            start_dt, end_dt = _bounds(trading_day, "regular")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO subscriptions(
+                  session_id,symbol,mode,trade_source,quote_source,quality,started_ns,ended_ns
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    cache_session_id,
+                    symbol,
+                    "alpaca-historical-sip-cache",
+                    "ALPACA_HIST_SIP_TRADE",
+                    "ALPACA_HIST_SIP_QUOTE",
+                    "ALPACA_SIP_TRADES_QUOTES",
+                    int(start_dt.timestamp() * 1_000_000_000),
+                    int(end_dt.timestamp() * 1_000_000_000),
+                ),
+            )
+            marker = json.dumps(
+                {
+                    "complete": True,
+                    "trading_day": trading_day.isoformat(),
+                    "feed": "sip",
+                    "session": "regular",
+                    "symbol": symbol,
+                    "quotes": q,
+                    "trades": t,
+                },
+                separators=(",", ":"),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES(?,?)",
+                (_cache_marker_key(cache_session_id, symbol), marker),
+            )
+
+            # The temporary recording is only a download staging area. Once the
+            # full symbol is atomically copied and marked complete, remove it so
+            # we do not keep a second copy of the same tick tape.
+            conn.execute("DELETE FROM raw_quotes WHERE session_id=?", (temp_session_id,))
+            conn.execute("DELETE FROM raw_trades WHERE session_id=?", (temp_session_id,))
+            conn.execute("DELETE FROM subscriptions WHERE session_id=?", (temp_session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_id=?", (temp_session_id,))
+            return q, t
+    finally:
+        conn.close()
 
 
 async def latest_completed_trading_day(
@@ -155,28 +404,109 @@ async def build_previous_session_replay(
 
     notify({"stage": "resolving_day", "symbols": symbols})
     trading_day = await latest_completed_trading_day(api_key=key, api_secret=secret)
-    notify(
-        {
-            "stage": "downloading",
-            "symbols": symbols,
-            "trading_day": trading_day.isoformat(),
-            "feed": "sip",
-            "requests_per_minute": REPLAY_DOWNLOAD_RPM,
-        }
-    )
-
     path = Path(db_path)
-    stats = await record_day(
-        symbols=symbols,
-        day=trading_day,
-        db_path=path,
-        feed="sip",
-        session="regular",
-        api_key=key,
-        api_secret=secret,
-        requests_per_minute=REPLAY_DOWNLOAD_RPM,
-    )
+    cache_session = _cache_session_id(trading_day)
+    total_requests = 0
+    total_retries = 0
+    cached_symbols: list[str] = []
+    downloaded_symbols: list[str] = []
 
+    # Intentionally sequential. A symbol is either already fully cached or is
+    # downloaded completely (quotes then trades), atomically promoted into the
+    # canonical day cache, and only then do we move to the next symbol.
+    for index, symbol in enumerate(symbols, 1):
+        cached = _cached_symbol_counts(
+            path,
+            session_id=cache_session,
+            symbol=symbol,
+        )
+        if cached is not None:
+            cached_symbols.append(symbol)
+            notify(
+                {
+                    "stage": "downloading",
+                    "symbols": [symbol],
+                    "all_symbols": symbols,
+                    "current_symbol": symbol,
+                    "symbol_index": index,
+                    "symbol_total": len(symbols),
+                    "trading_day": trading_day.isoformat(),
+                    "feed": "sip",
+                    "cache_hit": True,
+                    "cached_symbols": list(cached_symbols),
+                    "downloaded_symbols": list(downloaded_symbols),
+                }
+            )
+            continue
+
+        notify(
+            {
+                "stage": "downloading",
+                "symbols": [symbol],
+                "all_symbols": symbols,
+                "current_symbol": symbol,
+                "symbol_index": index,
+                "symbol_total": len(symbols),
+                "trading_day": trading_day.isoformat(),
+                "feed": "sip",
+                "requests_per_minute": REPLAY_DOWNLOAD_RPM,
+                "cache_hit": False,
+                "cached_symbols": list(cached_symbols),
+                "downloaded_symbols": list(downloaded_symbols),
+            }
+        )
+        single = await record_day(
+            symbols=[symbol],
+            day=trading_day,
+            db_path=path,
+            feed="sip",
+            session="regular",
+            api_key=key,
+            api_secret=secret,
+            requests_per_minute=REPLAY_DOWNLOAD_RPM,
+        )
+        total_requests += single.requests
+        total_retries += single.retries
+        _merge_temp_symbol_into_cache(
+            path,
+            temp_session_id=single.session_id,
+            cache_session_id=cache_session,
+            trading_day=trading_day,
+            symbol=symbol,
+        )
+        downloaded_symbols.append(symbol)
+
+        # record_day has its own request pacer. Keep a small inter-symbol gap so
+        # restarting that pacer cannot create a boundary burst near 200 RPM.
+        if index < len(symbols):
+            await asyncio.sleep(60.0 / REPLAY_DOWNLOAD_RPM)
+
+    quote_total = 0
+    trade_total = 0
+    for symbol in symbols:
+        counts = _cached_symbol_counts(
+            path,
+            session_id=cache_session,
+            symbol=symbol,
+        )
+        if counts is None:
+            raise RuntimeError(f"Replay cache verification failed for {symbol}")
+        q, t = counts
+        quote_total += q
+        trade_total += t
+
+    start_dt, end_dt = _bounds(trading_day, "regular")
+    stats = DownloadStats(
+        session_id=cache_session,
+        symbols=symbols,
+        feed="sip",
+        start=_iso_z(start_dt),
+        end=_iso_z(end_dt),
+        quotes=quote_total,
+        trades=trade_total,
+        requests=total_requests,
+        retries=total_retries,
+    )
     notify(
         {
             "stage": "indexing",
@@ -185,6 +515,10 @@ async def build_previous_session_replay(
             "quotes": stats.quotes,
             "trades": stats.trades,
             "requests": stats.requests,
+            "cached_symbols": cached_symbols,
+            "downloaded_symbols": downloaded_symbols,
+            "cache_hit": not downloaded_symbols,
+            "download_strategy": "sequential_per_symbol",
         }
     )
     runtime = ReplayRuntime(
