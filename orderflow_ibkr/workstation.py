@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
 from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
 
+from .alpaca_replay import REPLAY_SYMBOL_CAP, build_previous_session_replay, clean_replay_symbols
 from .alpaca_runtime import AlpacaOrderFlowRuntime
 from .history import load_history
 from .replay_runtime import ReplayRuntime
@@ -28,11 +30,17 @@ ASSETS = {
 
 
 class WorkstationServer:
-    def __init__(self, runtime: Any, root: Path):
+    def __init__(self, runtime: Any, root: Path, args: argparse.Namespace):
         self.runtime = runtime
         self.root = root
+        self.args = args
         self.clients: set[web.WebSocketResponse] = set()
         self.broadcaster: asyncio.Task | None = None
+        self.replay_prepare_task: asyncio.Task | None = None
+        self.replay_prepare_state: dict[str, Any] = {
+            "state": "idle",
+            "symbol_cap": REPLAY_SYMBOL_CAP,
+        }
 
     async def page(self, request: web.Request) -> web.Response:
         html = (self.root / "flow_v2.html").read_text(encoding="utf-8")
@@ -89,9 +97,6 @@ class WorkstationServer:
             raise web.HTTPBadRequest(text="symbol is required")
         if symbol not in self.runtime.symbols:
             raise web.HTTPBadRequest(text=f"symbol {symbol} is not in the active universe")
-        # LIVE warm-starts from the current session. REPLAY is reconstructed from
-        # the read-only event source, so exposing source-session future rows here
-        # would create look-ahead leakage. Return only the current snapshot state.
         if isinstance(self.runtime, ReplayRuntime):
             return web.json_response(
                 {
@@ -126,9 +131,7 @@ class WorkstationServer:
 
     async def replay_control(self, request: web.Request) -> web.Response:
         if not isinstance(self.runtime, ReplayRuntime):
-            raise web.HTTPConflict(
-                text="Workstation is running in LIVE mode. Restart with --source replay."
-            )
+            raise web.HTTPConflict(text="Replay is not active yet. Use SIM REPLAY to prepare a session.")
         try:
             body = await request.json()
         except Exception:
@@ -158,6 +161,155 @@ class WorkstationServer:
         else:
             raise web.HTTPBadRequest(text="unknown replay action")
         return web.json_response(self.runtime.replay_state())
+
+    def _credentials_configured(self) -> bool:
+        key = self.args.alpaca_key or os.getenv("APCA_API_KEY_ID")
+        secret = self.args.alpaca_secret or os.getenv("APCA_API_SECRET_KEY")
+        return bool(key and secret)
+
+    async def replay_prepare_info(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                **self.replay_prepare_state,
+                "symbol_cap": REPLAY_SYMBOL_CAP,
+                "credentials_configured": self._credentials_configured(),
+                "current_symbols": list(self.runtime.symbols)[:REPLAY_SYMBOL_CAP],
+                "feed": "sip",
+                "session": "regular",
+                "historical_rpm": 200,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def replay_prepare(self, request: web.Request) -> web.Response:
+        if self.replay_prepare_task and not self.replay_prepare_task.done():
+            raise web.HTTPConflict(text="A replay download is already in progress")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            raw_symbols = body.get("symbols") or []
+            if isinstance(raw_symbols, str):
+                raw_symbols = [raw_symbols]
+            symbols = clean_replay_symbols([str(value) for value in raw_symbols])
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+        api_key = str(body.get("api_key") or self.args.alpaca_key or "") or None
+        api_secret = str(body.get("api_secret") or self.args.alpaca_secret or "") or None
+        replay_db = Path(self.args.replay_db or "data/alpaca_replay.sqlite")
+        self.replay_prepare_state = {
+            "state": "preparing",
+            "stage": "queued",
+            "symbols": symbols,
+            "symbol_cap": REPLAY_SYMBOL_CAP,
+            "feed": "sip",
+        }
+        self.replay_prepare_task = asyncio.create_task(
+            self._prepare_previous_session(
+                symbols=symbols,
+                api_key=api_key,
+                api_secret=api_secret,
+                replay_db=replay_db,
+            )
+        )
+        return web.json_response(self.replay_prepare_state, status=202)
+
+    async def _restart_broadcaster(self) -> None:
+        old = self.broadcaster
+        if old and old is not asyncio.current_task():
+            old.cancel()
+            try:
+                await old
+            except asyncio.CancelledError:
+                pass
+        self.broadcaster = asyncio.create_task(self.broadcast_loop())
+
+    async def _push_snapshot_to_clients(self) -> None:
+        payload = json.dumps(
+            {"type": "snapshot", "data": self.runtime.snapshot()},
+            separators=(",", ":"),
+            default=str,
+        )
+        dead: list[web.WebSocketResponse] = []
+        for ws in tuple(self.clients):
+            try:
+                await ws.send_str(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.clients.discard(ws)
+
+    async def _prepare_previous_session(
+        self,
+        *,
+        symbols: list[str],
+        api_key: str | None,
+        api_secret: str | None,
+        replay_db: Path,
+    ) -> None:
+        new_runtime: ReplayRuntime | None = None
+
+        def progress(payload: dict[str, Any]) -> None:
+            self.replay_prepare_state.update(payload)
+            self.replay_prepare_state["state"] = "preparing"
+            self.replay_prepare_state["symbol_cap"] = REPLAY_SYMBOL_CAP
+
+        try:
+            prepared = await build_previous_session_replay(
+                symbols=symbols,
+                db_path=replay_db,
+                api_key=api_key,
+                api_secret=api_secret,
+                speed=1.0,
+                on_progress=progress,
+            )
+            new_runtime = prepared.runtime
+            self.replay_prepare_state.update(
+                {
+                    "state": "preparing",
+                    "stage": "switching",
+                    "trading_day": prepared.trading_day.isoformat(),
+                    "quotes": prepared.stats.quotes,
+                    "trades": prepared.stats.trades,
+                    "requests": prepared.stats.requests,
+                }
+            )
+
+            old_runtime = self.runtime
+            await old_runtime.stop()
+            self.runtime = new_runtime
+            await self._restart_broadcaster()
+            await self._push_snapshot_to_clients()
+            self.replay_prepare_state.update(
+                {
+                    "state": "ready",
+                    "stage": "ready",
+                    "session_id": prepared.stats.session_id,
+                    "trading_day": prepared.trading_day.isoformat(),
+                    "symbols": symbols,
+                    "quotes": prepared.stats.quotes,
+                    "trades": prepared.stats.trades,
+                    "requests": prepared.stats.requests,
+                    "replay_db": str(prepared.db_path.resolve()),
+                }
+            )
+            new_runtime = None
+        except asyncio.CancelledError:
+            if new_runtime is not None:
+                await new_runtime.stop()
+            raise
+        except Exception as exc:
+            if new_runtime is not None:
+                await new_runtime.stop()
+            self.replay_prepare_state.update(
+                {
+                    "state": "error",
+                    "stage": "error",
+                    "message": str(exc),
+                }
+            )
 
     async def ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2 * 1024 * 1024)
@@ -209,6 +361,8 @@ class WorkstationServer:
         app.router.add_get("/api/history", self.history)
         app.router.add_get("/api/replay", self.replay_state)
         app.router.add_post("/api/replay/control", self.replay_control)
+        app.router.add_get("/api/replay/prepare", self.replay_prepare_info)
+        app.router.add_post("/api/replay/prepare", self.replay_prepare)
         app.router.add_get("/ws", self.ws)
         return app
 
@@ -243,7 +397,7 @@ async def serve(args: argparse.Namespace) -> None:
             market_data_lines=args.market_data_lines,
         )
     await runtime.start()
-    server = WorkstationServer(runtime, root)
+    server = WorkstationServer(runtime, root, args)
     runner = web.AppRunner(server.app(), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, args.http_host, args.http_port).start()
@@ -253,9 +407,7 @@ async def serve(args: argparse.Namespace) -> None:
     print(f"OrderFlowMap Radar:       http://{args.http_host}:{args.http_port}/radar")
     print(f"OrderFlowMap Learn:       http://{args.http_host}:{args.http_port}/learn")
     if isinstance(runtime, ReplayRuntime):
-        print(
-            f"GLOBAL MODE=REPLAY source_session={runtime.source_session} read_only=True"
-        )
+        print(f"GLOBAL MODE=REPLAY source_session={runtime.source_session} read_only=True")
         print(f"Replay range={runtime.start_ns}..{runtime.end_ns} speed={runtime.speed}x")
         print("Source SQLite is never written by ReplayRuntime.")
     elif isinstance(runtime, AlpacaOrderFlowRuntime):
@@ -281,6 +433,12 @@ async def serve(args: argparse.Namespace) -> None:
     try:
         await stop.wait()
     finally:
+        if server.replay_prepare_task and not server.replay_prepare_task.done():
+            server.replay_prepare_task.cancel()
+            try:
+                await server.replay_prepare_task
+            except asyncio.CancelledError:
+                pass
         if server.broadcaster:
             server.broadcaster.cancel()
             try:
@@ -288,7 +446,7 @@ async def serve(args: argparse.Namespace) -> None:
             except asyncio.CancelledError:
                 pass
         await runner.cleanup()
-        await runtime.stop()
+        await server.runtime.stop()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -323,7 +481,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alpaca-secret", default=None, help="Defaults to APCA_API_SECRET_KEY")
     p.add_argument("--db", default="data/orderflow.sqlite")
     p.add_argument(
-        "--replay-db", default=None, help="Read-only recording SQLite; defaults to --db"
+        "--replay-db",
+        default=None,
+        help="Read-only startup replay SQLite; LIVE one-click replay uses data/alpaca_replay.sqlite when omitted",
     )
     p.add_argument(
         "--replay-session", default=None, help="Source recording session id; auto-select if omitted"
