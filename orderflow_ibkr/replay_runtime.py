@@ -22,16 +22,7 @@ class ReplayRuntime:
     latest_state rows are written back to the source recording.
     """
 
-    def __init__(
-        self,
-        *,
-        symbols: list[str],
-        db_path: str | Path,
-        source_session: str | None = None,
-        start_ns: int | None = None,
-        duration_sec: int = 1800,
-        speed: float = 1.0,
-    ) -> None:
+    def __init__(self, *, symbols: list[str], db_path: str | Path, source_session: str | None = None, start_ns: int | None = None, duration_sec: int = 1800, speed: float = 1.0) -> None:
         self.symbols = [s.upper() for s in symbols]
         self.db_path = Path(db_path)
         self.source_session = source_session
@@ -54,18 +45,10 @@ class ReplayRuntime:
         self.start_ns = 0
         self.end_ns = 0
         self.market_time_ns = 0
-        self.plan = SimpleNamespace(
-            active_mode="REPLAY",
-            quality="TBT_TRADES_MKTDATA_QUOTES",
-            market_data_lines=0,
-            tbt_capacity=0,
-            trade_source="RECORDED_TBT",
-            quote_source="RECORDED_L1",
-        )
+        self.plan = SimpleNamespace(active_mode="REPLAY", quality="TBT_TRADES_MKTDATA_QUOTES", market_data_lines=0, tbt_capacity=0, trade_source="RECORDED_TBT", quote_source="RECORDED_L1")
 
     @property
     def writer(self) -> SimpleNamespace:
-        # Preserve snapshot contract without creating any writer.
         return SimpleNamespace(written=0, dropped=0)
 
     def _publish(self, payload: dict[str, Any]) -> None:
@@ -88,17 +71,7 @@ class ReplayRuntime:
             return self.source_session
         placeholders = ",".join("?" for _ in self.symbols)
         rows = conn.execute(
-            f"""
-            SELECT session_id,
-                   COUNT(DISTINCT symbol) AS n_symbols,
-                   MIN(ts_ns) AS lo,
-                   MAX(ts_ns) AS hi
-            FROM raw_trades
-            WHERE symbol IN ({placeholders})
-            GROUP BY session_id
-            HAVING n_symbols = ?
-            ORDER BY (hi-lo) DESC, hi DESC
-            """,
+            f"SELECT session_id, COUNT(DISTINCT symbol) AS n_symbols, MIN(ts_ns) AS lo, MAX(ts_ns) AS hi FROM raw_trades WHERE symbol IN ({placeholders}) GROUP BY session_id HAVING n_symbols = ? ORDER BY (hi-lo) DESC, hi DESC",
             [*self.symbols, len(self.symbols)],
         ).fetchall()
         if not rows:
@@ -110,13 +83,7 @@ class ReplayRuntime:
             self.source_session = self._choose_source_session(conn)
             placeholders = ",".join("?" for _ in self.symbols)
             bounds = conn.execute(
-                f"""
-                SELECT MAX(lo) AS common_lo, MIN(hi) AS common_hi FROM (
-                  SELECT symbol, MIN(ts_ns) lo, MAX(ts_ns) hi
-                  FROM raw_quotes
-                  WHERE session_id=? AND symbol IN ({placeholders}) GROUP BY symbol
-                )
-                """,
+                f"SELECT MAX(lo) AS common_lo, MIN(hi) AS common_hi FROM (SELECT symbol, MIN(ts_ns) lo, MAX(ts_ns) hi FROM raw_quotes WHERE session_id=? AND symbol IN ({placeholders}) GROUP BY symbol)",
                 [self.source_session, *self.symbols],
             ).fetchone()
             common_lo = int(bounds["common_lo"] or 0)
@@ -127,32 +94,14 @@ class ReplayRuntime:
             self.end_ns = min(common_hi, self.start_ns + self.duration_sec * 1_000_000_000)
             if self.end_ns <= self.start_ns:
                 raise RuntimeError("Replay interval has no data")
-
             args = [self.source_session, self.start_ns, self.end_ns, *self.symbols]
-            qrows = conn.execute(
-                f"""
-                SELECT * FROM raw_quotes
-                WHERE session_id=? AND ts_ns BETWEEN ? AND ? AND symbol IN ({placeholders})
-                ORDER BY ts_ns, id
-                """,
-                args,
-            ).fetchall()
-            trows = conn.execute(
-                f"""
-                SELECT * FROM raw_trades
-                WHERE session_id=? AND ts_ns BETWEEN ? AND ? AND symbol IN ({placeholders})
-                ORDER BY ts_ns, id
-                """,
-                args,
-            ).fetchall()
-
+            qrows = conn.execute(f"SELECT * FROM raw_quotes WHERE session_id=? AND ts_ns BETWEEN ? AND ? AND symbol IN ({placeholders}) ORDER BY ts_ns, id", args).fetchall()
+            trows = conn.execute(f"SELECT * FROM raw_trades WHERE session_id=? AND ts_ns BETWEEN ? AND ? AND symbol IN ({placeholders}) ORDER BY ts_ns, id", args).fetchall()
         events: list[tuple[int, int, str, str, dict[str, Any]]] = []
         for r in qrows:
-            d = dict(r)
-            events.append((int(d["ts_ns"]), 0, str(d["symbol"]), "quote", d))
+            d = dict(r); events.append((int(d["ts_ns"]), 0, str(d["symbol"]), "quote", d))
         for r in trows:
-            d = dict(r)
-            events.append((int(d["ts_ns"]), 1, str(d["symbol"]), "trade", d))
+            d = dict(r); events.append((int(d["ts_ns"]), 1, str(d["symbol"]), "trade", d))
         events.sort(key=lambda e: (e[0], e[1]))
         if not events:
             raise RuntimeError("Replay interval contains no events")
@@ -163,22 +112,11 @@ class ReplayRuntime:
 
     def _reset_state(self) -> None:
         self.engine = OrderFlowEngine()
-        self.latest_metrics.clear()
-        self.latest_quotes.clear()
-        self.latest_trades.clear()
-        self._last_metric_ns.clear()
-        self._last_ranking_ns = 0
-        self._index = 0
-        self.market_time_ns = self.start_ns
+        self.latest_metrics.clear(); self.latest_quotes.clear(); self.latest_trades.clear()
+        self._last_metric_ns.clear(); self._last_ranking_ns = 0; self._index = 0; self.market_time_ns = self.start_ns
 
     def _emit_quote(self, symbol: str, row: dict[str, Any]) -> None:
-        q = QuoteEvent(
-            ts_ns=int(row["ts_ns"]), bid=row.get("bid"), ask=row.get("ask"),
-            bid_size=row.get("bid_size"), ask_size=row.get("ask_size"), last=row.get("last"),
-            last_size=row.get("last_size"), volume=row.get("volume"), vwap=row.get("vwap"),
-            trade_count=row.get("trade_count"), trade_rate=row.get("trade_rate"), volume_rate=row.get("volume_rate"),
-            source="REPLAY_RECORDED_L1", quality=str(row.get("quality") or self.plan.quality),
-        )
+        q = QuoteEvent(ts_ns=int(row["ts_ns"]), bid=row.get("bid"), ask=row.get("ask"), bid_size=row.get("bid_size"), ask_size=row.get("ask_size"), last=row.get("last"), last_size=row.get("last_size"), volume=row.get("volume"), vwap=row.get("vwap"), trade_count=row.get("trade_count"), trade_rate=row.get("trade_rate"), volume_rate=row.get("volume_rate"), source="REPLAY_RECORDED_L1", quality=str(row.get("quality") or self.plan.quality))
         self.engine.state(symbol).add_quote(q)
         out = {**asdict(q), "session_id": self.session_id, "symbol": symbol, "source_session": self.source_session}
         self.latest_quotes[symbol] = out
@@ -190,12 +128,7 @@ class ReplayRuntime:
             conditions = json.loads(row.get("conditions_json") or "[]")
         except Exception:
             conditions = []
-        t = TradeEvent(
-            ts_ns=int(row["ts_ns"]), price=float(row["price"]), size=float(row["size"]),
-            exchange=row.get("exchange"), conditions=conditions, aggressor=str(row.get("aggressor") or "UNKNOWN"),
-            aggressor_confidence=float(row.get("aggressor_confidence") or 0.0),
-            source="REPLAY_RECORDED_TBT", quality=str(row.get("quality") or self.plan.quality),
-        )
+        t = TradeEvent(ts_ns=int(row["ts_ns"]), price=float(row["price"]), size=float(row["size"]), exchange=row.get("exchange"), conditions=conditions, aggressor=str(row.get("aggressor") or "UNKNOWN"), aggressor_confidence=float(row.get("aggressor_confidence") or 0.0), source="REPLAY_RECORDED_TBT", quality=str(row.get("quality") or self.plan.quality))
         self.engine.state(symbol).add_trade(t)
         out = {**asdict(t), "session_id": self.session_id, "symbol": symbol, "source_session": self.source_session}
         self.latest_trades[symbol] = out
@@ -213,24 +146,12 @@ class ReplayRuntime:
         if now_ns - self._last_ranking_ns >= 2_000_000_000:
             self._last_ranking_ns = now_ns
             items = sorted(self.latest_metrics.items(), key=lambda kv: kv[1].get("score", 0.0), reverse=True)
-            self._publish({"type": "ranking", "data": [
-                {"session_id": self.session_id, "symbol": s, "ts_ns": now_ns, "rank": i,
-                 "score": m.get("score", 0.0), "activity_score": m.get("activity_score", 0.0),
-                 "flow_score": m.get("flow_score", 50.0), "absorption_score": m.get("absorption_score", 0.0),
-                 "quality": m.get("quality", self.plan.quality)}
-                for i, (s, m) in enumerate(items, 1)
-            ]})
+            self._publish({"type": "ranking", "data": [{"session_id": self.session_id, "symbol": s, "ts_ns": now_ns, "rank": i, "score": m.get("score", 0.0), "activity_score": m.get("activity_score", 0.0), "flow_score": m.get("flow_score", 50.0), "absorption_score": m.get("absorption_score", 0.0), "quality": m.get("quality", self.plan.quality)} for i, (s, m) in enumerate(items, 1)]})
 
     def _step_one(self) -> bool:
-        if self._index >= len(self._events):
-            return False
-        ts_ns, _, symbol, kind, row = self._events[self._index]
-        self._index += 1
-        self.market_time_ns = ts_ns
-        if kind == "quote":
-            self._emit_quote(symbol, row)
-        else:
-            self._emit_trade(symbol, row)
+        if self._index >= len(self._events): return False
+        ts_ns, _, symbol, kind, row = self._events[self._index]; self._index += 1; self.market_time_ns = ts_ns
+        self._emit_quote(symbol, row) if kind == "quote" else self._emit_trade(symbol, row)
         return True
 
     async def _play_loop(self) -> None:
@@ -240,83 +161,52 @@ class ReplayRuntime:
                 previous_ts = self.market_time_ns or current_ts
                 delay = max(0.0, (current_ts - previous_ts) / 1_000_000_000 / self.speed)
                 if delay:
-                    await asyncio.sleep(min(delay, 2.0))
-                if not self._playing:
-                    break
+                    # 1x means one market second equals one wall-clock second.
+                    await asyncio.sleep(delay)
+                if not self._playing: break
                 self._step_one()
             if self._index >= len(self._events):
-                self._playing = False
-                self._publish({"type": "replay", "data": self.replay_state()})
+                self._playing = False; self._publish({"type": "replay", "data": self.replay_state()})
         except asyncio.CancelledError:
             raise
 
     async def play(self) -> None:
         self._playing = True
-        if not self._play_task or self._play_task.done():
-            self._play_task = asyncio.create_task(self._play_loop())
+        if not self._play_task or self._play_task.done(): self._play_task = asyncio.create_task(self._play_loop())
         self._publish({"type": "replay", "data": self.replay_state()})
 
     async def pause(self) -> None:
-        self._playing = False
-        self._publish({"type": "replay", "data": self.replay_state()})
+        self._playing = False; self._publish({"type": "replay", "data": self.replay_state()})
 
     async def set_speed(self, speed: float) -> None:
-        self.speed = max(0.01, min(float(speed), 1000.0))
-        self._publish({"type": "replay", "data": self.replay_state()})
+        self.speed = max(0.01, min(float(speed), 1000.0)); self._publish({"type": "replay", "data": self.replay_state()})
 
     async def seek(self, target_ns: int) -> None:
-        was_playing = self._playing
-        self._playing = False
-        self._reset_state()
+        was_playing = self._playing; self._playing = False; self._reset_state()
         target_ns = max(self.start_ns, min(int(target_ns), self.end_ns))
-        # Deterministic fast-forward from the beginning. No wall-clock sleeps.
-        while self._index < len(self._events) and self._events[self._index][0] <= target_ns:
-            self._step_one()
+        while self._index < len(self._events) and self._events[self._index][0] <= target_ns: self._step_one()
         self.market_time_ns = target_ns
-        self._publish({"type": "snapshot", "data": self.snapshot()})
-        self._publish({"type": "replay", "data": self.replay_state()})
-        if was_playing:
-            await self.play()
+        self._publish({"type": "snapshot", "data": self.snapshot()}); self._publish({"type": "replay", "data": self.replay_state()})
+        if was_playing: await self.play()
 
-    async def next_bar(self, seconds: int = 30) -> None:
-        await self.seek(self.market_time_ns + seconds * 1_000_000_000)
-
-    async def prev_bar(self, seconds: int = 30) -> None:
-        await self.seek(self.market_time_ns - seconds * 1_000_000_000)
+    async def next_bar(self, seconds: int = 30) -> None: await self.seek(self.market_time_ns + seconds * 1_000_000_000)
+    async def prev_bar(self, seconds: int = 30) -> None: await self.seek(self.market_time_ns - seconds * 1_000_000_000)
 
     async def start(self) -> None:
         self._load_events()
-        self.status = {
-            "state": "running", "runtime_mode": "REPLAY", "session_id": self.session_id,
-            "source_session": self.source_session, "mode": "REPLAY", "quality": self.plan.quality,
-            "symbols": self.symbols, "db_path": str(self.db_path.resolve()), "read_only": True,
-            "start_ns": self.start_ns, "end_ns": self.end_ns, "market_time_ns": self.market_time_ns,
-        }
-        self._publish({"type": "status", "data": self.status})
-        self._publish({"type": "replay", "data": self.replay_state()})
+        self.status = {"state": "running", "runtime_mode": "REPLAY", "session_id": self.session_id, "source_session": self.source_session, "mode": "REPLAY", "quality": self.plan.quality, "symbols": self.symbols, "db_path": str(self.db_path.resolve()), "read_only": True, "start_ns": self.start_ns, "end_ns": self.end_ns, "market_time_ns": self.market_time_ns}
+        self._publish({"type": "status", "data": self.status}); self._publish({"type": "replay", "data": self.replay_state()})
 
     async def stop(self) -> None:
         self._playing = False
         if self._play_task:
             self._play_task.cancel()
-            try:
-                await self._play_task
-            except asyncio.CancelledError:
-                pass
+            try: await self._play_task
+            except asyncio.CancelledError: pass
 
     def replay_state(self) -> dict[str, Any]:
-        duration = max(1, self.end_ns - self.start_ns)
-        progress = max(0.0, min(1.0, (self.market_time_ns - self.start_ns) / duration))
-        return {
-            "runtime_mode": "REPLAY", "playing": self._playing, "speed": self.speed,
-            "market_time_ns": self.market_time_ns, "start_ns": self.start_ns, "end_ns": self.end_ns,
-            "progress": progress, "index": self._index, "events": len(self._events),
-            "source_session": self.source_session, "read_only": True,
-        }
+        duration = max(1, self.end_ns - self.start_ns); progress = max(0.0, min(1.0, (self.market_time_ns - self.start_ns) / duration))
+        return {"runtime_mode": "REPLAY", "playing": self._playing, "speed": self.speed, "market_time_ns": self.market_time_ns, "start_ns": self.start_ns, "end_ns": self.end_ns, "progress": progress, "index": self._index, "events": len(self._events), "source_session": self.source_session, "read_only": True}
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "status": {**self.status, "market_time_ns": self.market_time_ns, "replay": self.replay_state()},
-            "quotes": self.latest_quotes, "trades": self.latest_trades, "metrics": self.latest_metrics,
-            "writer": {"written": 0, "dropped": 0}, "replay": self.replay_state(),
-        }
+        return {"status": {**self.status, "market_time_ns": self.market_time_ns, "replay": self.replay_state()}, "quotes": self.latest_quotes, "trades": self.latest_trades, "metrics": self.latest_metrics, "writer": {"written": 0, "dropped": 0}, "replay": self.replay_state()}
