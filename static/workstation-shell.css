@@ -33,3 +33,10 @@
 .pressure-metrics-only #view-pressure.on #pressureMetricsOnlyCanvas{display:block!important;width:100%!important;height:100%!important}
 .pressureViewToggle{margin-left:auto;border:1px solid #343434;background:#111;color:#aaa;padding:3px 7px;font:8px ui-monospace;cursor:pointer}
 .pressureViewToggle:hover{color:#fff;border-color:#5c7f8a;background:#142027}
+/* Use an overlay-like thumb throughout the workstation; never show a white native track. */
+*,*::before,*::after{scrollbar-width:thin;scrollbar-color:rgba(102,199,232,.42) transparent}
+*::-webkit-scrollbar{width:7px;height:7px;background:transparent}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:rgba(102,199,232,.38);border:2px solid transparent;background-clip:padding-box;border-radius:999px}
+*::-webkit-scrollbar-thumb:hover{background:rgba(102,199,232,.72);border:1px solid transparent;background-clip:padding-box}
+*::-webkit-scrollbar-corner{background:transparent}
