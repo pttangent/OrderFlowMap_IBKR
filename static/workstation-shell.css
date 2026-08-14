@@ -45,13 +45,17 @@
 .fpPanSurface{cursor:grab;user-select:none;touch-action:none}
 .fpPanSurface.is-dragging{cursor:grabbing;scroll-snap-type:none!important}
 #view-footprint .fpTsScroll .fpBar{flex-basis:calc(330px * var(--fp-ts-scale,1))!important}
-/* Keep Universe readable at a glance; five compact columns fit without a nested scrollbar. */
-.pane:not(.right)>.section.fill{flex:0 0 auto!important}
-.pane:not(.right)>.section.fill>.universe{flex:0 0 auto!important;overflow:visible!important}
+/* Keep Universe compact at the top; pin Display and the guide to the bottom. */
+.pane:not(.right){overflow:hidden!important}
+.pane:not(.right)>.section.fill{flex:0 0 auto!important;min-height:0!important}
+.pane:not(.right)>.section.fill>.universe{flex:0 0 auto!important;max-height:none!important;overflow:visible!important}
 .pane:not(.right) .universe .row{grid-template-columns:42px minmax(0,1fr) 48px 42px 72px!important;gap:4px!important;padding:4px 6px!important;min-height:25px;font-size:9px}
 .pane:not(.right) .universe .row .stateTag{font-size:7px}
 .pane:not(.right)>.section.fill>.title{height:29px!important}
-.pane:not(.right)>.miniGuide{padding:6px 8px!important;font-size:8px!important;line-height:1.35!important}
+.pane:not(.right)>.section:not(.fill){flex:0 0 auto!important;margin-top:auto!important}
+.pane:not(.right)>.section:not(.fill) .controls{padding:4px 8px!important}
+.pane:not(.right)>.section:not(.fill) .control{margin:4px 0!important;gap:5px!important;font-size:8px!important}
+.pane:not(.right)>.miniGuide{flex:0 0 auto!important;padding:5px 8px!important;font-size:7.5px!important;line-height:1.25!important}
 /* Right rail order: L1 BBO → executed flow → microstructure → signal. */
 .pane.right>.section.fill{flex:1 1 auto!important;min-height:0!important}
 .pane.right>.section:not(.fill){flex:0 0 auto!important}
