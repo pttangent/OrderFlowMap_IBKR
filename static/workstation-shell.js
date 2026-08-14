@@ -3,7 +3,7 @@ const $=s=>document.querySelector(s);
 const el=(tag,cls,html='')=>{const n=document.createElement(tag);n.className=cls;n.innerHTML=html;return n};
 const fmt=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0});
 const bps=n=>`${Number(n||0)>=0?'+':''}${Number(n||0).toFixed(2)} bps`;
-let snapshot=null,replay=null,prepareInfo=null,preparePoll=null;
+let snapshot=null,replay=null,prepareInfo=null,preparePoll=null,wasReplayMode=false;
 
 function selectedSymbol(){return window.OF?.S?.selected||snapshot?.status?.symbols?.[0]||''}
 function selectedMetrics(){const s=selectedSymbol();return snapshot?.metrics?.[s]||window.OF?.latest?.(s,'metrics')||null}
@@ -16,7 +16,8 @@ document.body.appendChild(top);
 
 const bar=el('div','wsReplayBar');
 bar.innerHTML=`<button data-a="restart">⏮</button><button data-a="prev_bar">◀ BAR</button><button data-a="play" id="wsPlay">▶ PLAY</button><button data-a="next_bar">BAR ▶</button><div class="wsTimeline"><span class="wsTimelineTop" id="wsClock">--:--:-- ET</span><input id="wsSeek" type="range" min="0" max="1000" value="0"><span class="wsTimelineBottom" id="wsPrice">—</span></div><select id="wsSpeed"><option>.25</option><option>.5</option><option selected>1</option><option>2</option><option>5</option><option>10</option><option>25</option><option>100</option></select>`;
-document.body.appendChild(bar);
+function mountReplayBar(){const head=document.querySelector('#view-footprint .viewHead'),quality=head?.querySelector('.qualityNote');if(!head){document.body.appendChild(bar);return}if(bar.parentElement!==head)head.insertBefore(bar,quality||null)}
+mountReplayBar();
 
 const novice=el('aside','wsNovice');
 novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT 回答什么？</h4><ul><li><strong>哪几个价位发生最大交换？</strong> 看每根 Bar 的 POC 与 Volume。</li><li><strong>哪边主动成交占优？</strong> 看 Sell@Bid / Buy@Ask / Δ。</li><li><strong>单边成交是否真的推动价格？</strong> 把 Δ 和左边 Candle 的实际价格结果一起看。</li></ul><h4>最重要的判断顺序</h4><p>① 先看 Candle 有没有价格进展。<br>② 再看同一根 Footprint 谁在主动成交。<br>③ 如果成交方向和价格结果背离，切到 Pressure 检查 Absorption。<br>④ CVD 用于确认/背离，不单独作为方向信号。</p><h4>结构标记</h4><p><strong>青框：</strong>单根 Bar POC。<br><strong>橙框：</strong>Diagonal Imbalance。<br><strong>BID ABS：</strong>负 Δ 但 Candle 上涨。<br><strong>OFFER ABS：</strong>正 Δ 但 Candle 下跌。</p><h4>Replay</h4><p>SIM REPLAY 会在背景逐只下载 Alpaca Historical SIP。左侧 ACTIVE 表示该股票整日录像已准备好；INACTIVE 表示仍在下载或排队。准备期间不会锁住主界面。</p>`;
@@ -68,13 +69,14 @@ function marketPrice(){
 function renderReplay(){
  const isReplay=isReplayMode();document.getElementById('wsMode').textContent=isReplay?'REPLAY':'LIVE';bar.classList.toggle('on',isReplay);
  document.getElementById('wsReplayBtn').classList.toggle('on',isReplay);
+ if(isReplay&&!wasReplayMode){mountReplayBar();window.OF?.setView?.('footprint')}wasReplayMode=isReplay;
  if(!isReplay)return;replay=snapshot?.replay||snapshot?.status?.replay||replay;if(!replay)return;
  const progress=Math.max(0,Math.min(1,Number(replay.progress||0)));document.getElementById('wsSeek').value=Math.round(progress*1000);
  const pct=Math.max(4,Math.min(96,progress*100));const clock=document.getElementById('wsClock'),price=document.getElementById('wsPrice');clock.textContent=marketClock(replay.market_time_ns);price.textContent=marketPrice();clock.style.left=`${pct}%`;price.style.left=`${pct}%`;
  document.getElementById('wsPlay').textContent=replay.playing?'Ⅱ PAUSE':'▶ PLAY';document.getElementById('wsSpeed').value=String(replay.speed||1);
 }
 async function control(action,extra={}){const r=await fetch('/api/replay/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...extra})});if(!r.ok){alert(await r.text());return}replay=await r.json();if(snapshot)snapshot.replay=replay;renderReplay()}
-bar.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>{let a=b.dataset.a;if(a==='play'&&replay?.playing)a='pause';control(a)});
+bar.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>{let a=b.dataset.a;if(a==='play'&&replay?.playing)a='pause';const seconds=(a==='prev_bar'||a==='next_bar')?(Number(window.OF?.footprintInterval?.())||30):undefined;control(a,seconds?{seconds}:{})});
 document.getElementById('wsSeek').onchange=e=>control('seek',{progress:+e.target.value/1000});document.getElementById('wsSpeed').onchange=e=>control('speed',{speed:+e.target.value});
 document.getElementById('wsNoviceBtn').onclick=()=>{novice.classList.toggle('on');document.getElementById('wsNoviceBtn').classList.toggle('on',novice.classList.contains('on'))};
 
