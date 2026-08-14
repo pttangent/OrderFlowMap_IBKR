@@ -156,11 +156,11 @@ setInterval(bindFootprintInteractions,500);
 const footprintCanvasHoverBound=new WeakSet();
 function ensureFootprintPriceTip(){let tip=document.querySelector('.fpPriceTip');if(!tip){tip=document.createElement('div');tip.className='fpPriceTip';document.body.appendChild(tip)}return tip}
 function bindFootprintCanvasHover(){
- const OF=window.O;
+ const OF=window.OF;
  document.querySelectorAll('#view-footprint #fpCanvasComp').forEach(canvas=>{
   if(footprintCanvasHoverBound.has(canvas))return;
   footprintCanvasHoverBound.add(canvas);
-  canvas.addEventListener('mousemove',event=>{
+  const showPrice=event=>{
    const geometry=OF?.footprintGeometry?.(),host=document.getElementById('fpStudy'),rect=canvas.getBoundingClientRect();
    if(!geometry?.bars?.length||!host||!rect.width||!rect.height)return;
    const tip=ensureFootprintPriceTip(),{bars,step,zoom}=geometry,top=30,rowH=19,left=58,bw=126,cellW=39;
@@ -173,7 +173,9 @@ function bindFootprintCanvasHover(){
    const level=[...bar.levels.values()].find(item=>Math.abs(Number(item.price)-rounded)<step*.26);
    tip.innerHTML=`<b>${side}</b><br>Price ${OF.num(rounded,rounded<1?4:2)}<br>${key==='sell'?'Sell':'Buy'} ${OF.num(level?.[key],0)}`;
    tip.style.left=Math.min(window.innerWidth-tip.offsetWidth-8,event.clientX+12)+'px';tip.style.top=Math.min(window.innerHeight-tip.offsetHeight-8,event.clientY+12)+'px';tip.style.display='block';
-  });
+  };
+  canvas.addEventListener('pointermove',showPrice);
+  canvas.addEventListener('mousemove',showPrice);
   canvas.addEventListener('mouseleave',()=>{const tip=document.querySelector('.fpPriceTip');if(tip)tip.style.display='none'});
  });
 }
