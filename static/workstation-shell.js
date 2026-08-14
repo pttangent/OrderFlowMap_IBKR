@@ -58,6 +58,7 @@ function drawPressureMetricsOnly(){
  const bars=pressureBarsForMetrics();if(!bars.length)return;
  const maxHits=Math.max(1,...bars.flatMap(bar=>bar.hits)),maxVolume=Math.max(1,...bars.map(bar=>bar.volume));
  const colors=['#4bd39b','#ff7474','#9be6c9','#ffaaaa','#66c7e8','#e6bd61'],slot=width/bars.length,top=12,bottom=height-20;
+ g.save();g.strokeStyle='rgba(150,150,150,.34)';g.lineWidth=1;for(let index=0;index<=bars.length;index++){const x=Math.round(index*slot)+.5;g.beginPath();g.moveTo(x,top-2);g.lineTo(x,bottom+1);g.stroke()}g.restore();
  bars.forEach((bar,index)=>{
    const values=[...bar.hits,bar.volume/maxVolume*maxHits],gap=Math.max(1,slot*.025),barWidth=Math.max(1,(slot*.82-gap*5)/6);
    values.forEach((value,column)=>{const barHeight=(bottom-top)*value/maxHits;g.fillStyle=colors[column];g.fillRect(index*slot+slot*.09+column*(barWidth+gap),bottom-barHeight,barWidth,barHeight)});
