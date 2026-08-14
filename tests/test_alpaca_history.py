@@ -35,32 +35,32 @@ def test_alpaca_historical_rows_are_replay_runtime_compatible(tmp_path: Path) ->
     start_ns = 1_786_714_200_000_000_000
     end_ns = start_ns + 10_000_000_000
     _begin_recording(
-        conn,
-        session_id=session_id,
-        symbols=["XE"],
-        feed="sip",
-        start_ns=start_ns,
-        end_ns=end_ns,
-        start_text="2026-08-14T13:30:00Z",
-        end_text="2026-08-14T13:30:10Z",
+        conn, session_id=session_id, symbols=["XE"], feed="sip",
+        start_ns=start_ns, end_ns=end_ns,
+        start_text="2026-08-14T13:30:00Z", end_text="2026-08-14T13:30:10Z",
     )
     assert _insert_quotes(conn, session_id=session_id, symbol="XE", feed="sip", rows=qrows) == 2
     assert _insert_trades(conn, session_id=session_id, symbol="XE", feed="sip", rows=trows) == 2
+    first = conn.execute(
+        "SELECT bid_size, ask_size FROM raw_quotes WHERE session_id=? ORDER BY ts_ns LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    assert first[0] == 500
+    assert first[1] == 700
     conn.close()
 
     async def run() -> None:
         replay = ReplayRuntime(
-            symbols=["XE"],
-            db_path=db,
-            source_session=session_id,
-            duration_sec=10,
-            speed=100,
+            symbols=["XE"], db_path=db, source_session=session_id,
+            duration_sec=10, speed=100,
         )
         await replay.start()
         assert replay.status["source_provider"] == "ALPACA"
         assert replay.plan.quality == "ALPACA_SIP_TRADES_QUOTES"
         assert len(replay._events) == 4
         await replay.seek(replay.end_ns)
+        assert replay.latest_quotes["XE"]["bid_size"] == 800
+        assert replay.latest_quotes["XE"]["ask_size"] == 600
         assert replay.latest_quotes["XE"]["source"].startswith("REPLAY:ALPACA_HIST_SIP_QUOTE")
         assert replay.latest_trades["XE"]["source"].startswith("REPLAY:ALPACA_HIST_SIP_TRADE")
         assert replay.writer.written == 0

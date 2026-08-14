@@ -8,7 +8,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from .alpaca_adapter import _rfc3339_to_ns
+from .alpaca_adapter import _quote_size_shares, _rfc3339_to_ns
 from .storage import DDL
 
 HistoricalFeed = Literal["sip", "iex"]
@@ -96,7 +96,6 @@ async def _pages(
         query = dict(params)
         if page_token:
             query["page_token"] = page_token
-
         attempt = 0
         while True:
             await pacer.wait()
@@ -131,7 +130,6 @@ async def _pages(
                     raise RuntimeError(f"Alpaca request failed after retries: {exc}") from exc
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
-
         yield payload
         page_token = payload.get("next_page_token")
         if not page_token:
@@ -169,6 +167,8 @@ def _begin_recording(
             "start": start_text,
             "end": end_text,
             "replay_base": True,
+            "quote_size_unit": "shares",
+            "quote_size_source_unit": "round_lots",
         },
         separators=(",", ":"),
     )
@@ -231,8 +231,8 @@ def _insert_quotes(
             _rfc3339_to_ns(row["t"]),
             row.get("bp"),
             row.get("ap"),
-            row.get("bs"),
-            row.get("as"),
+            _quote_size_shares(row.get("bs")),
+            _quote_size_shares(row.get("as")),
             None,
             None,
             None,
@@ -320,7 +320,6 @@ async def record_day(
         )
     if feed not in {"sip", "iex"}:
         raise ValueError(f"Unsupported historical stock feed: {feed}")
-
     start_dt, end_dt = _bounds(day, session)
     start_text, end_text = _iso_z(start_dt), _iso_z(end_dt)
     start_ns = int(start_dt.timestamp() * 1_000_000_000)
@@ -333,9 +332,7 @@ async def record_day(
         start=start_text,
         end=end_text,
     )
-
-    db = Path(db_path)
-    conn = _open_db(db)
+    conn = _open_db(Path(db_path))
     _begin_recording(
         conn,
         session_id=session_id,
@@ -346,25 +343,16 @@ async def record_day(
         start_text=start_text,
         end_text=end_text,
     )
-
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params = {
-        "start": start_text,
-        "end": end_text,
-        "feed": feed,
-        "limit": 10000,
-        "sort": "asc",
-    }
+    params = {"start": start_text, "end": end_text, "feed": feed, "limit": 10000, "sort": "asc"}
     pacer = RequestPacer(requests_per_minute)
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=75)
-
     try:
         async with aiohttp.ClientSession(timeout=timeout) as client:
             for symbol in symbols:
-                quote_url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes"
                 async for page in _pages(
                     client,
-                    url=quote_url,
+                    url=f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes",
                     params=params,
                     headers=headers,
                     pacer=pacer,
@@ -377,11 +365,9 @@ async def record_day(
                         feed=feed,
                         rows=page.get("quotes") or [],
                     )
-
-                trade_url = f"https://data.alpaca.markets/v2/stocks/{symbol}/trades"
                 async for page in _pages(
                     client,
-                    url=trade_url,
+                    url=f"https://data.alpaca.markets/v2/stocks/{symbol}/trades",
                     params=params,
                     headers=headers,
                     pacer=pacer,
@@ -396,18 +382,17 @@ async def record_day(
                     )
     except Exception:
         conn.execute(
-            "UPDATE sessions SET notes = COALESCE(notes,'') || ? WHERE session_id=?",
+            "UPDATE sessions SET notes=COALESCE(notes,'') || ? WHERE session_id=?",
             ("\nINCOMPLETE_DOWNLOAD", session_id),
         )
         conn.commit()
         raise
     finally:
         conn.close()
-
     if stats.quotes == 0 or stats.trades == 0:
         raise RuntimeError(
             f"Recording is incomplete for replay: quotes={stats.quotes}, trades={stats.trades}. "
-            "Check the trading date, symbol, feed entitlement and requested session."
+            "Check trading date, symbol, feed entitlement and requested session."
         )
     return stats
 
@@ -426,12 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="regular",
         help="regular=09:30-16:00 ET, extended=04:00-20:00 ET",
     )
-    parser.add_argument(
-        "--requests-per-minute",
-        type=int,
-        default=180,
-        help="Client-side pacing; raise this if your Alpaca plan permits a higher rate.",
-    )
+    parser.add_argument("--requests-per-minute", type=int, default=180)
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--alpaca-key", default=None)
     parser.add_argument("--alpaca-secret", default=None)
