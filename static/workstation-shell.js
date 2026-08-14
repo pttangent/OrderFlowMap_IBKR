@@ -14,9 +14,12 @@ const top=el('div','wsTopActions');
 top.innerHTML=`<span class="wsMode">MODE <b id="wsMode">...</b></span><a class="wsAction" href="/radar">RADAR</a><button class="wsAction" id="wsNoviceBtn">NOVICE</button><a class="wsAction" href="/learn" target="_blank">TEACHING</a><button class="wsAction" id="wsLiveBtn">LIVE</button><button class="wsAction replay" id="wsReplayBtn">SIM REPLAY</button>`;
 document.body.appendChild(top);
 
+function ensureFormationTitle(){const panel=document.getElementById('view-formation');if(!panel||panel.querySelector('.viewHead'))return;const head=el('div','viewHead wsFormationHead','<div><b>PRICE FORMATION</b><span>成交、BBO 與 CVD 的時間序列</span></div><div class="qualityNote" id="formationQuality"></div>');panel.insertBefore(head,panel.firstChild);panel.classList.add('wsFormationTitle')}
+ensureFormationTitle();
+
 const bar=el('div','wsReplayBar');
 bar.innerHTML=`<button data-a="restart">⏮</button><button data-a="prev_bar">◀ BAR</button><button data-a="play" id="wsPlay">▶ PLAY</button><button data-a="next_bar">BAR ▶</button><div class="wsTimeline"><span class="wsTimelineTop" id="wsClock">--:--:-- ET</span><input id="wsSeek" type="range" min="0" max="1000" value="0"><span class="wsTimelineBottom" id="wsPrice">—</span></div><select id="wsSpeed"><option>.25</option><option>.5</option><option selected>1</option><option>2</option><option>5</option><option>10</option><option>25</option><option>100</option></select>`;
-function mountReplayBar(){const head=document.querySelector('.viewPanel.altView.on .viewHead')||document.querySelector('#view-footprint .viewHead'),quality=head?.querySelector('.qualityNote');if(!head){document.body.appendChild(bar);return}if(bar.parentElement!==head)head.insertBefore(bar,quality||null)}
+function mountReplayBar(){ensureFormationTitle();const head=document.querySelector('.viewPanel.on .viewHead')||document.querySelector('#view-footprint .viewHead'),quality=head?.querySelector('.qualityNote');if(!head){document.body.appendChild(bar);return}if(bar.parentElement!==head)head.insertBefore(bar,quality||null)}
 mountReplayBar();
 document.addEventListener('click',event=>{if(!event.target.closest('.viewBtn'))return;requestAnimationFrame(()=>{if(isReplayMode())mountReplayBar()})});
 
