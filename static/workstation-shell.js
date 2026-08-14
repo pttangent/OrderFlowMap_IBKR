@@ -8,6 +8,7 @@ let snapshot=null,replay=null,prepareInfo=null,preparePoll=null;
 function selectedSymbol(){return window.OF?.S?.selected||snapshot?.status?.symbols?.[0]||''}
 function selectedMetrics(){const s=selectedSymbol();return snapshot?.metrics?.[s]||window.OF?.latest?.(s,'metrics')||null}
 function splitSymbols(text){return [...new Set(String(text||'').toUpperCase().split(/[\s,]+/).map(x=>x.trim()).filter(Boolean))]}
+function isReplayMode(){return (snapshot?.status?.runtime_mode||snapshot?.status?.mode)==='REPLAY'}
 
 const top=el('div','wsTopActions');
 top.innerHTML=`<span class="wsMode">MODE <b id="wsMode">...</b></span><a class="wsAction" href="/radar">RADAR</a><button class="wsAction" id="wsNoviceBtn">NOVICE</button><a class="wsAction" href="/learn" target="_blank">TEACHING</a><button class="wsAction replay" id="wsReplayBtn">SIM REPLAY</button>`;
@@ -18,16 +19,17 @@ bar.innerHTML=`<button data-a="restart">⏮</button><button data-a="prev_bar">�
 document.body.appendChild(bar);
 
 const novice=el('aside','wsNovice');
-novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT 回答什么？</h4><ul><li><strong>哪几个价位发生最大交换？</strong> 看每根 Bar 的 POC 与 Volume。</li><li><strong>哪边主动成交占优？</strong> 看 Sell@Bid / Buy@Ask / Δ。</li><li><strong>单边成交是否真的推动价格？</strong> 把 Δ 和左边 Candle 的实际价格结果一起看。</li></ul><h4>最重要的判断顺序</h4><p>① 先看 Candle 有没有价格进展。<br>② 再看同一根 Footprint 谁在主动成交。<br>③ 如果成交方向和价格结果背离，切到 Pressure 检查 Absorption。<br>④ CVD 用于确认/背离，不单独作为方向信号。</p><h4>结构标记</h4><p><strong>青框：</strong>单根 Bar POC。<br><strong>橙框：</strong>Diagonal Imbalance。<br><strong>BID ABS：</strong>负 Δ 但 Candle 上涨。<br><strong>OFFER ABS：</strong>正 Δ 但 Candle 下跌。</p><h4>Replay</h4><p>SIM REPLAY 会先用 Alpaca 免费 Historical SIP 下载最近一个完整交易日的逐笔成交与 BBO context，再热切换整个 Workstation。Replay 期间所有页面跟随同一市场时钟。</p>`;
+novice.innerHTML=`<h3>NOVICE // 当前 View 怎么看</h3><h4>CANDLE + FOOTPRINT 回答什么？</h4><ul><li><strong>哪几个价位发生最大交换？</strong> 看每根 Bar 的 POC 与 Volume。</li><li><strong>哪边主动成交占优？</strong> 看 Sell@Bid / Buy@Ask / Δ。</li><li><strong>单边成交是否真的推动价格？</strong> 把 Δ 和左边 Candle 的实际价格结果一起看。</li></ul><h4>最重要的判断顺序</h4><p>① 先看 Candle 有没有价格进展。<br>② 再看同一根 Footprint 谁在主动成交。<br>③ 如果成交方向和价格结果背离，切到 Pressure 检查 Absorption。<br>④ CVD 用于确认/背离，不单独作为方向信号。</p><h4>结构标记</h4><p><strong>青框：</strong>单根 Bar POC。<br><strong>橙框：</strong>Diagonal Imbalance。<br><strong>BID ABS：</strong>负 Δ 但 Candle 上涨。<br><strong>OFFER ABS：</strong>正 Δ 但 Candle 下跌。</p><h4>Replay</h4><p>SIM REPLAY 会在背景逐只下载 Alpaca Historical SIP。左侧 ACTIVE 表示该股票整日录像已准备好；INACTIVE 表示仍在下载或排队。准备期间不会锁住主界面。</p>`;
 document.body.appendChild(novice);
 
 const modal=el('div','wsReplayModal');
-modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>载入最近完整交易日</h2><p class="wsReplayLead">输入要关注的美股。系统会使用 Alpaca Historical SIP 下载上一完整交易日的 trades + quotes，完成后整个 Workstation 自动切换到 Replay。</p><label>Symbols</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="XE SNDK NVDA"><div class="wsReplayHint" id="wsReplayHint">免费层安全上限：30 symbols</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">LOAD PREVIOUS SESSION</button></div>`;
+modal.innerHTML=`<div class="wsReplayDialog"><button class="wsReplayClose" id="wsReplayClose">×</button><div class="wsReplayKicker">GLOBAL MARKET REPLAY</div><h2>准备最近完整交易日</h2><p class="wsReplayLead">输入最多 5 只美股。按下后窗口会立即关闭，数据在背景逐只下载；左侧 Symbol 列表会显示 ACTIVE / INACTIVE 状态。</p><label>Symbols</label><input id="wsReplaySymbols" class="wsReplayInput" autocomplete="off" spellcheck="false" placeholder="XE SNDK NVDA"><div class="wsReplayHint" id="wsReplayHint">最多 5 只；逐只下载，完成即 ACTIVE。</div><div id="wsReplayCredentials"><label>Alpaca API Key</label><input id="wsReplayKey" class="wsReplayInput" type="password" autocomplete="off"><label>Alpaca API Secret</label><input id="wsReplaySecret" class="wsReplayInput" type="password" autocomplete="off"><div class="wsReplayHint">仅发送到本机 Workstation，本页不保存凭证。</div></div><div class="wsReplayError" id="wsReplayError"></div><button class="wsReplayStart" id="wsReplayStart">PREPARE REPLAY</button></div>`;
 document.body.appendChild(modal);
 
-const loader=el('div','wsReplayLoading');
-loader.innerHTML=`<div class="wsLoaderCard"><div class="wsSpinner"></div><div class="wsLoaderKicker">PREPARING REPLAY</div><h2 id="wsLoaderTitle">正在准备市场录像</h2><p id="wsLoaderDetail">正在连接 Alpaca Historical SIP…</p><div class="wsLoaderStats" id="wsLoaderStats"></div><div class="wsLoaderLock">下载完成前已锁定操作。LIVE 数据仍在后台运行，直到 Replay 可以安全接管。</div></div>`;
-document.body.appendChild(loader);
+const prepPane=el('div','wsReplayPrepPane');
+prepPane.innerHTML=`<div class="wsPrepHead"><span>REPLAY SYMBOLS</span><b id="wsPrepSummary">0 / 0 ACTIVE</b></div><div id="wsPrepDay" class="wsPrepDay">等待选择股票</div><div id="wsPrepList" class="wsPrepList"></div><div id="wsPrepNote" class="wsPrepNote"></div>`;
+const universe=document.getElementById('universe');
+if(universe?.parentElement)universe.parentElement.appendChild(prepPane);
 
 function ensureMetrics(){
  let host=document.getElementById('wsMetrics');if(host)return host;
@@ -45,14 +47,13 @@ function marketPrice(){
  const s=selectedSymbol();if(!s)return'—';
  const t=snapshot?.trades?.[s]||window.OF?.latest?.(s,'trade');
  const q=snapshot?.quotes?.[s]||window.OF?.latest?.(s,'quote');
- let p=Number(t?.price);
- if(!Number.isFinite(p))p=Number(q?.last);
+ let p=Number(t?.price);if(!Number.isFinite(p))p=Number(q?.last);
  if(!Number.isFinite(p)){const bid=Number(q?.bid),ask=Number(q?.ask);if(Number.isFinite(bid)&&Number.isFinite(ask))p=(bid+ask)/2}
  return Number.isFinite(p)?`${s}  $${p.toFixed(2)}`:`${s}  —`;
 }
 function renderReplay(){
- const mode=snapshot?.status?.runtime_mode||snapshot?.status?.mode||'LIVE';const isReplay=mode==='REPLAY';
- document.getElementById('wsMode').textContent=isReplay?'REPLAY':'LIVE';document.getElementById('wsReplayBtn').classList.toggle('on',isReplay);bar.classList.toggle('on',isReplay);
+ const isReplay=isReplayMode();document.getElementById('wsMode').textContent=isReplay?'REPLAY':'LIVE';bar.classList.toggle('on',isReplay);
+ document.getElementById('wsReplayBtn').classList.toggle('on',isReplay);
  if(!isReplay)return;replay=snapshot?.replay||snapshot?.status?.replay||replay;if(!replay)return;
  const progress=Math.max(0,Math.min(1,Number(replay.progress||0)));document.getElementById('wsSeek').value=Math.round(progress*1000);
  const pct=Math.max(4,Math.min(96,progress*100));const clock=document.getElementById('wsClock'),price=document.getElementById('wsPrice');clock.textContent=marketClock(replay.market_time_ns);price.textContent=marketPrice();clock.style.left=`${pct}%`;price.style.left=`${pct}%`;
@@ -63,42 +64,73 @@ bar.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>{let a=b.dataset
 document.getElementById('wsSeek').onchange=e=>control('seek',{progress:+e.target.value/1000});document.getElementById('wsSpeed').onchange=e=>control('speed',{speed:+e.target.value});
 document.getElementById('wsNoviceBtn').onclick=()=>{novice.classList.toggle('on');document.getElementById('wsNoviceBtn').classList.toggle('on',novice.classList.contains('on'))};
 
+function prepSymbols(s){
+ const values=s?.all_symbols||s?.symbols||snapshot?.status?.symbols||[];
+ return [...new Set(values.map(x=>String(x).toUpperCase()))];
+}
+function prepReadySet(s,syms){
+ if(s?.state==='ready'||isReplayMode())return new Set(syms);
+ return new Set([...(s?.cached_symbols||[]),...(s?.downloaded_symbols||[])].map(x=>String(x).toUpperCase()));
+}
+function renderPrepUniverse(s=prepareInfo){
+ const btn=document.getElementById('wsReplayBtn');const hint=document.getElementById('uHint');
+ if(!s||s.state==='idle'){
+   prepPane.classList.remove('on');btn.classList.remove('preparing');btn.textContent='SIM REPLAY';return;
+ }
+ const syms=prepSymbols(s);if(!syms.length){prepPane.classList.remove('on');return}
+ const ready=prepReadySet(s,syms);const current=String(s.current_symbol||'').toUpperCase();const failed=s.state==='error'?current:'';
+ prepPane.classList.add('on');if(hint)hint.textContent=s.state==='ready'?'REPLAY ACTIVE':'REPLAY PREP';
+ const activeCount=syms.filter(x=>ready.has(x)).length;document.getElementById('wsPrepSummary').textContent=`${activeCount} / ${syms.length} ACTIVE`;
+ document.getElementById('wsPrepDay').textContent=s.trading_day?`${s.trading_day} · ALPACA SIP · REGULAR SESSION`:'正在确认最近完整交易日…';
+ document.getElementById('wsPrepList').innerHTML=syms.map((sym,i)=>{
+   const isReady=ready.has(sym),isCurrent=current===sym&&!isReady,isError=failed===sym;
+   const cls=isError?'error':isReady?'active':'inactive';
+   const label=isError?'ERROR':isReady?'ACTIVE':isCurrent?'INACTIVE · DOWNLOADING':'INACTIVE · QUEUED';
+   const marker=isReady?'●':isError?'×':isCurrent?'◌':'○';
+   return `<button class="wsPrepRow ${cls}" data-prep-sym="${sym}" ${isReady&&isReplayMode()?'':'disabled'}><span class="wsPrepDot">${marker}</span><b>${sym}</b><span class="wsPrepIndex">${i+1}/${syms.length}</span><span class="wsPrepState">${label}</span></button>`;
+ }).join('');
+ document.querySelectorAll('.wsPrepRow.active:not(:disabled)').forEach(row=>row.onclick=()=>window.OF?.selectSymbol?.(row.dataset.prepSym));
+ const note=document.getElementById('wsPrepNote');
+ if(s.state==='error')note.textContent=s.message||'下载失败。点击 SIM REPLAY 可重新设置。';
+ else if(s.state==='ready'||isReplayMode())note.textContent='全部录像已准备完成。ACTIVE symbol 可直接切换查看。';
+ else note.textContent=`后台逐只下载；当前 ${s.symbol_index||Math.min(activeCount+1,syms.length)} / ${s.symbol_total||syms.length}。主界面不会被锁定。`;
+ const preparing=s.state==='preparing';btn.classList.toggle('preparing',preparing);btn.textContent=preparing?`REPLAY ${activeCount}/${syms.length}`:'SIM REPLAY';
+}
+
 function openReplayModal(){
  document.getElementById('wsReplayError').textContent='';modal.classList.add('on');
  fetch('/api/replay/prepare',{cache:'no-store'}).then(r=>r.json()).then(info=>{
-   prepareInfo=info;const cap=Number(info.symbol_cap||30);document.getElementById('wsReplayHint').textContent=`最多 ${cap} 只；免费 Historical SIP 为 200 req/min，完整逐笔越多下载越久。`;
+   prepareInfo=info;const cap=Number(info.symbol_cap||5);document.getElementById('wsReplayHint').textContent=`最多 ${cap} 只；逐只完整下载，完成后左侧变为 ACTIVE。`;
    const current=(info.current_symbols||snapshot?.status?.symbols||[]).slice(0,cap);if(!document.getElementById('wsReplaySymbols').value)document.getElementById('wsReplaySymbols').value=current.join(' ');
-   document.getElementById('wsReplayCredentials').style.display=info.credentials_configured?'none':'block';
+   document.getElementById('wsReplayCredentials').style.display=info.credentials_configured?'none':'block';renderPrepUniverse(info);
  }).catch(()=>{});
 }
-document.getElementById('wsReplayBtn').onclick=()=>{const isReplay=(snapshot?.status?.runtime_mode||snapshot?.status?.mode)==='REPLAY';if(isReplay){bar.classList.toggle('on');return}openReplayModal()};
+document.getElementById('wsReplayBtn').onclick=()=>{if(isReplayMode()){bar.classList.toggle('on');return}if(prepareInfo?.state==='preparing'){prepPane.classList.add('on');return}openReplayModal()};
 document.getElementById('wsReplayClose').onclick=()=>modal.classList.remove('on');
 
-function stageText(s){return({queued:'排入下载队列',resolving_day:'确认最近完整美股交易日',downloading:'下载整日 trades + quotes',indexing:'建立本地 Replay tape',switching:'切换全局 Runtime',ready:'Replay 已就绪',error:'Replay 准备失败'})[s]||'正在准备市场录像'}
-function showLoader(state){
- loader.classList.add('on');document.getElementById('wsLoaderTitle').textContent=stageText(state.stage);const day=state.trading_day?`交易日 ${state.trading_day} · `:'';document.getElementById('wsLoaderDetail').textContent=`${day}${(state.symbols||[]).join(' · ')}`;
- const stats=[];if(state.trades!=null)stats.push(`Trades ${fmt(state.trades)}`);if(state.quotes!=null)stats.push(`Quotes ${fmt(state.quotes)}`);if(state.requests!=null)stats.push(`API ${fmt(state.requests)}`);document.getElementById('wsLoaderStats').textContent=stats.join('  /  ')||'Alpaca SIP historical · local SQLite';
-}
 function stopPreparePoll(){if(preparePoll){clearInterval(preparePoll);preparePoll=null}}
 async function pollPrepare(){
- try{const r=await fetch('/api/replay/prepare',{cache:'no-store'});if(!r.ok)return;const s=await r.json();prepareInfo=s;
-   if(s.state==='preparing'){showLoader(s);return}
-   if(s.state==='ready'){stopPreparePoll();loader.classList.remove('on');modal.classList.remove('on');await refresh();return}
-   if(s.state==='error'){stopPreparePoll();loader.classList.remove('on');modal.classList.add('on');document.getElementById('wsReplayError').textContent=s.message||'Replay preparation failed';return}
+ try{const r=await fetch('/api/replay/prepare',{cache:'no-store'});if(!r.ok)return;const s=await r.json();prepareInfo=s;renderPrepUniverse(s);
+   if(s.state==='preparing')return;
+   if(s.state==='ready'){stopPreparePoll();await refresh();renderPrepUniverse(s);return}
+   if(s.state==='error'){stopPreparePoll();renderPrepUniverse(s);return}
  }catch(e){}
 }
 function beginPreparePoll(){stopPreparePoll();preparePoll=setInterval(pollPrepare,700);pollPrepare()}
 document.getElementById('wsReplayStart').onclick=async()=>{
- const symbols=splitSymbols(document.getElementById('wsReplaySymbols').value);const cap=Number(prepareInfo?.symbol_cap||30);const err=document.getElementById('wsReplayError');err.textContent='';
+ const symbols=splitSymbols(document.getElementById('wsReplaySymbols').value);const cap=Number(prepareInfo?.symbol_cap||5);const err=document.getElementById('wsReplayError');err.textContent='';
  if(!symbols.length){err.textContent='请输入至少一只股票。';return}if(symbols.length>cap){err.textContent=`最多选择 ${cap} 只股票。`;return}
  const payload={symbols};if(!prepareInfo?.credentials_configured){payload.api_key=document.getElementById('wsReplayKey').value.trim();payload.api_secret=document.getElementById('wsReplaySecret').value.trim()}
- showLoader({stage:'queued',symbols});
- try{const r=await fetch('/api/replay/prepare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){loader.classList.remove('on');err.textContent=await r.text();return}beginPreparePoll()}catch(e){loader.classList.remove('on');err.textContent=String(e)}
+ try{
+   const r=await fetch('/api/replay/prepare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   if(!r.ok){err.textContent=await r.text();return}
+   prepareInfo=await r.json();modal.classList.remove('on');renderPrepUniverse(prepareInfo);beginPreparePoll();
+ }catch(e){err.textContent=String(e)}
 };
 
-async function refresh(){try{const r=await fetch('/api/snapshot',{cache:'no-store'});if(r.ok){snapshot=await r.json();renderMetrics();renderReplay()}}catch(e){}}
+async function refresh(){try{const r=await fetch('/api/snapshot',{cache:'no-store'});if(r.ok){snapshot=await r.json();renderMetrics();renderReplay();renderPrepUniverse(prepareInfo)}}catch(e){}}
 setInterval(refresh,750);setTimeout(refresh,50);setTimeout(ensureMetrics,100);
-setTimeout(async()=>{try{const r=await fetch('/api/replay/prepare',{cache:'no-store'});if(r.ok){const s=await r.json();prepareInfo=s;if(s.state==='preparing')beginPreparePoll()}}catch(e){}},150);
+setTimeout(async()=>{try{const r=await fetch('/api/replay/prepare',{cache:'no-store'});if(r.ok){const s=await r.json();prepareInfo=s;renderPrepUniverse(s);if(s.state==='preparing')beginPreparePoll()}}catch(e){}},150);
 
 const old=window.WebSocket;if(old&&!window.__wsReplayWrapped){window.__wsReplayWrapped=true}
 })();
