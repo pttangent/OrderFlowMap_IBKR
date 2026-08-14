@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from orderflow_ibkr.alpaca_adapter import AlpacaAdapter, _rfc3339_to_ns
+
+
+def test_rfc3339_parser_preserves_nanoseconds() -> None:
+    value = _rfc3339_to_ns("2026-08-14T13:30:00.123456789Z")
+    assert value % 1_000_000_000 == 123_456_789
+
+
+def test_alpaca_trade_and_quote_map_to_common_event_contract() -> None:
+    quotes = []
+    trades = []
+    adapter = AlpacaAdapter(
+        symbols=["XE"],
+        feed="sip",
+        api_key="k",
+        api_secret="s",
+        on_quote=lambda symbol, event: quotes.append((symbol, event)),
+        on_trade=lambda symbol, event: trades.append((symbol, event)),
+        reconnect=False,
+    )
+
+    adapter._handle_item(
+        {
+            "T": "q",
+            "S": "XE",
+            "bx": "Q",
+            "bp": 45.10,
+            "bs": 12,
+            "ax": "P",
+            "ap": 45.12,
+            "as": 9,
+            "c": ["R"],
+            "t": "2026-08-14T13:30:00.000000111Z",
+            "z": "C",
+        }
+    )
+    adapter._handle_item(
+        {
+            "T": "t",
+            "S": "XE",
+            "i": 42,
+            "x": "Q",
+            "p": 45.12,
+            "s": 300,
+            "c": ["@"],
+            "t": "2026-08-14T13:30:00.000000222Z",
+            "z": "C",
+        }
+    )
+
+    assert quotes[0][0] == "XE"
+    assert quotes[0][1].bid == 45.10
+    assert quotes[0][1].ask_size == 9
+    assert quotes[0][1].quality == "ALPACA_SIP_TRADES_QUOTES"
+    assert trades[0][0] == "XE"
+    assert trades[0][1].price == 45.12
+    assert trades[0][1].size == 300
+    assert trades[0][1].exchange == "Q"
+    assert trades[0][1].conditions == ["@"]
+    assert trades[0][1].quality == "ALPACA_SIP_TRADES_QUOTES"
+
+
+def test_free_live_feed_plan_is_explicitly_iex() -> None:
+    adapter = AlpacaAdapter(
+        symbols=["XE", "SNDK"],
+        feed="iex",
+        api_key="k",
+        api_secret="s",
+    )
+    assert adapter.url.endswith("/v2/iex")
+    assert adapter.plan.active_mode == "alpaca-iex"
+    assert adapter.plan.trade_source == "ALPACA_WS_IEX_TRADE"
+    assert adapter.plan.quality == "ALPACA_IEX_TRADES_QUOTES"

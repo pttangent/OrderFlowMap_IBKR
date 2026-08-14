@@ -9,6 +9,7 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
+from .alpaca_runtime import AlpacaOrderFlowRuntime
 from .history import load_history
 from .replay_runtime import ReplayRuntime
 from .runtime import OrderFlowRuntime
@@ -35,19 +36,21 @@ class WorkstationServer:
 
     async def page(self, request: web.Request) -> web.Response:
         html = (self.root / "flow_v2.html").read_text(encoding="utf-8")
-        hooks = (
-            '<link rel="stylesheet" href="/static/workstation-shell.css">'
-            '<script src="/static/footprint-timeseries.js"></script>'
-            '<script src="/static/workstation-shell.js"></script>'
-        )
         if "/static/workstation-shell.js" not in html:
-            html = html.replace("</head>", '<link rel="stylesheet" href="/static/workstation-shell.css"></head>')
+            html = html.replace(
+                "</head>",
+                '<link rel="stylesheet" href="/static/workstation-shell.css"></head>',
+            )
             html = html.replace(
                 "</body>",
                 '<script src="/static/footprint-timeseries.js"></script>'
                 '<script src="/static/workstation-shell.js"></script></body>',
             )
-        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def radar(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(self.root / "index.html", headers={"Cache-Control": "no-store"})
@@ -62,7 +65,10 @@ class WorkstationServer:
         name = request.match_info["name"]
         if name not in ASSETS:
             raise web.HTTPNotFound()
-        return web.FileResponse(self.root / "static" / name, headers={"Cache-Control": "no-store"})
+        return web.FileResponse(
+            self.root / "static" / name,
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def status(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.status)
@@ -120,7 +126,9 @@ class WorkstationServer:
 
     async def replay_control(self, request: web.Request) -> web.Response:
         if not isinstance(self.runtime, ReplayRuntime):
-            raise web.HTTPConflict(text="Workstation is running in LIVE mode. Restart with --source replay.")
+            raise web.HTTPConflict(
+                text="Workstation is running in LIVE mode. Restart with --source replay."
+            )
         try:
             body = await request.json()
         except Exception:
@@ -137,7 +145,9 @@ class WorkstationServer:
                 target_ns = int(body["target_ns"])
             else:
                 progress = max(0.0, min(1.0, float(body.get("progress", 0.0))))
-                target_ns = self.runtime.start_ns + int((self.runtime.end_ns - self.runtime.start_ns) * progress)
+                target_ns = self.runtime.start_ns + int(
+                    (self.runtime.end_ns - self.runtime.start_ns) * progress
+                )
             await self.runtime.seek(target_ns)
         elif action == "next_bar":
             await self.runtime.next_bar(int(body.get("seconds", 30)))
@@ -214,6 +224,14 @@ async def serve(args: argparse.Namespace) -> None:
             duration_sec=args.replay_duration * 60,
             speed=args.replay_speed,
         )
+    elif args.provider == "alpaca":
+        runtime = AlpacaOrderFlowRuntime(
+            symbols=args.symbols,
+            db_path=args.db,
+            feed=args.alpaca_feed,
+            api_key=args.alpaca_key,
+            api_secret=args.alpaca_secret,
+        )
     else:
         runtime = OrderFlowRuntime(
             symbols=args.symbols,
@@ -235,11 +253,22 @@ async def serve(args: argparse.Namespace) -> None:
     print(f"OrderFlowMap Radar:       http://{args.http_host}:{args.http_port}/radar")
     print(f"OrderFlowMap Learn:       http://{args.http_host}:{args.http_port}/learn")
     if isinstance(runtime, ReplayRuntime):
-        print(f"GLOBAL MODE=REPLAY source_session={runtime.source_session} read_only=True")
+        print(
+            f"GLOBAL MODE=REPLAY source_session={runtime.source_session} read_only=True"
+        )
         print(f"Replay range={runtime.start_ns}..{runtime.end_ns} speed={runtime.speed}x")
         print("Source SQLite is never written by ReplayRuntime.")
+    elif isinstance(runtime, AlpacaOrderFlowRuntime):
+        print(
+            f"GLOBAL MODE=LIVE provider=ALPACA feed={runtime.alpaca_feed} "
+            f"quality={runtime.plan.quality}"
+        )
+        print(f"SQLite={Path(args.db).resolve()}")
     else:
-        print(f"GLOBAL MODE=LIVE mode={runtime.plan.active_mode} quality={runtime.plan.quality}")
+        print(
+            f"GLOBAL MODE=LIVE provider=IBKR mode={runtime.plan.active_mode} "
+            f"quality={runtime.plan.quality}"
+        )
         print(f"SQLite={Path(args.db).resolve()}")
 
     stop = asyncio.Event()
@@ -263,19 +292,46 @@ async def serve(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="IBKR order-flow workstation with LIVE / global REPLAY sources")
+    p = argparse.ArgumentParser(
+        description="Order-flow workstation with IBKR/Alpaca LIVE and global SQLite REPLAY sources"
+    )
     p.add_argument("--symbols", nargs="+", required=True)
     p.add_argument("--source", choices=["live", "replay"], default="live")
-    p.add_argument("--mode", choices=["auto", "focus", "radar"], default="auto")
+    p.add_argument(
+        "--provider",
+        choices=["ibkr", "alpaca"],
+        default="ibkr",
+        help="LIVE market-data provider; ignored in REPLAY mode",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["auto", "focus", "radar"],
+        default="auto",
+        help="IBKR LIVE mode",
+    )
     p.add_argument("--ib-host", default="127.0.0.1")
     p.add_argument("--ib-port", type=int, default=7497)
     p.add_argument("--client-id", type=int, default=4712)
     p.add_argument("--market-data-lines", type=int, default=100)
+    p.add_argument(
+        "--alpaca-feed",
+        choices=["iex", "sip", "delayed_sip"],
+        default="iex",
+        help="Alpaca LIVE stock feed. IEX is the normal free live feed; SIP requires entitlement.",
+    )
+    p.add_argument("--alpaca-key", default=None, help="Defaults to APCA_API_KEY_ID")
+    p.add_argument("--alpaca-secret", default=None, help="Defaults to APCA_API_SECRET_KEY")
     p.add_argument("--db", default="data/orderflow.sqlite")
-    p.add_argument("--replay-db", default=None, help="Read-only recording SQLite; defaults to --db")
-    p.add_argument("--replay-session", default=None, help="Source recording session id; auto-select if omitted")
+    p.add_argument(
+        "--replay-db", default=None, help="Read-only recording SQLite; defaults to --db"
+    )
+    p.add_argument(
+        "--replay-session", default=None, help="Source recording session id; auto-select if omitted"
+    )
     p.add_argument("--replay-start-ns", type=int, default=None)
-    p.add_argument("--replay-duration", type=int, default=30, help="Replay market minutes; default 30")
+    p.add_argument(
+        "--replay-duration", type=int, default=30, help="Replay market minutes; default 30"
+    )
     p.add_argument("--replay-speed", type=float, default=1.0)
     p.add_argument("--http-host", default="127.0.0.1")
     p.add_argument("--http-port", type=int, default=8765)
